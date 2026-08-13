@@ -48,13 +48,11 @@
 
 ### Claude Code 額度顯示「未登入」
 
-QuotaDock 會尋找 PATH、npm 安裝目錄，以及 Claude 桌面版管理的 CLI。若仍顯示未登入，請在終端機執行：
+只登入 Claude 桌面版**不會**建立 Claude Code CLI 的憑證——桌面版是用內部代理帶著授權去跑 CLI，QuotaDock 獨立呼叫時仍是未登入狀態。
 
-```powershell
-claude login
-```
+此時 Claude Code 卡片會出現「登入 Claude Code」按鈕。按下去會開一個主控台視窗跑登入流程，在瀏覽器完成授權、視窗關閉後 QuotaDock 會自動重新讀取額度，不需要自己打指令。
 
-完成後回到 QuotaDock 按「立即更新」。只登入 Claude 桌面版不一定會建立 Claude Code CLI 所需的憑證。
+CLI 的搜尋順序是 PATH、npm 安裝目錄，以及 Claude 桌面版管理的 `%APPDATA%\Claude\claude-code\<版本>\claude.exe`（取版本最新者）。若安裝路徑特殊導致找不到，可用環境變數 `CLAUDE_USAGE_CLI` 直接指定執行檔。
 
 ## 從原始碼開發
 
