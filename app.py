@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 
 
 APP_NAME = "QuotaDock"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "CodexUsageWidget"
 STATE_PATH = APP_DIR / "usage_state.json"
 CLAUDE_STATE_PATH = APP_DIR / "claude_usage_state.json"
@@ -637,7 +637,8 @@ class ClaudeUsageClient:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=10,
+            # claude.exe 是 290MB 的單檔包，冷啟動常超過 10 秒，太短會被誤判成失敗。
+            timeout=30,
             creationflags=CREATE_NO_WINDOW,
         )
         try:
@@ -1225,11 +1226,13 @@ class UsageWidget(QWidget):
                 result["codex_error"] = str(exc)
             try:
                 result["claude"] = ClaudeUsageClient().fetch()
+            except subprocess.TimeoutExpired:
+                result["claude_error"] = "Claude Code 回應逾時，下次自動更新會再試一次。"
             except Exception as exc:
+                # 讀取失敗不等於未安裝：不在這裡偽造 unavailable 快照，
+                # 也不再呼叫 locate()——它若出錯會讓執行緒死在 except 裡，
+                # succeeded 訊號發不出去，整個面板就永遠凍結。
                 result["claude_error"] = str(exc)
-                result["claude"] = ClaudeUsageSnapshot.unavailable(
-                    installed=ClaudeCliLocator.locate() is not None
-                )
             self.signals.succeeded.emit(result)
 
         threading.Thread(target=task, daemon=True).start()
@@ -1321,6 +1324,10 @@ class UsageWidget(QWidget):
             self._render_claude(claude, str(result.get("claude_error") or ""))
             if claude.rate_limits_available:
                 self._save_claude_snapshot(claude)
+        else:
+            self._render_claude_error(
+                str(result.get("claude_error") or "Claude Code 用量暫時無法讀取。")
+            )
 
         self._update_mini_usage()
         if isinstance(codex, UsageSnapshot):
@@ -1351,6 +1358,14 @@ class UsageWidget(QWidget):
             self.used_label.setText("目前沒有可顯示的額度")
             self.cycle_label.setText("額度週期")
             self.reset_label.setText("Codex 未提供此資料")
+
+    def _render_claude_error(self, message: str) -> None:
+        """暫時性讀取失敗：明說讀不到，不冒充「未安裝」，也不沿用舊畫面。"""
+        self.claude_five_section.hide()
+        self.claude_week_section.hide()
+        self.claude_login_button.hide()
+        self.claude_badge.setText("暫時無法讀取")
+        self.claude_status.setText(message)
 
     def _render_claude(self, snapshot: ClaudeUsageSnapshot, error: str = "") -> None:
         self.claude_five_section.hide()
