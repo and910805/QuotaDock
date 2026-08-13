@@ -8,6 +8,7 @@ from app import (
     crossed_five_percent_level,
     detect_cycle_reset,
     duration_label,
+    mini_remaining,
     reset_time_label,
 )
 
@@ -101,6 +102,69 @@ def test_batch_shims_run_through_an_interpreter(tmp_path: Path) -> None:
     ]
     assert ClaudeCliLocator.command(tmp_path / "claude.cmd", ["auth"])[:2] == ["cmd.exe", "/c"]
     assert ClaudeCliLocator.command(tmp_path / "claude.ps1", ["auth"])[0] == "powershell.exe"
+
+
+def claude_snapshot(five_hour: float, seven_day: float) -> ClaudeUsageSnapshot:
+    return ClaudeUsageSnapshot.from_response(
+        {
+            "subscription_type": "max",
+            "rate_limits_available": True,
+            "rate_limits": {
+                "five_hour": {"utilization": five_hour, "resets_at": None},
+                "seven_day": {"utilization": seven_day, "resets_at": None},
+            },
+        },
+        auth_method="claude.ai",
+        logged_in=True,
+    )
+
+
+def test_mini_source_selects_the_right_provider() -> None:
+    codex = snapshot(60, 2_000)  # 剩 40%
+    claude = claude_snapshot(10, 90)  # 剩 90% / 10%
+    assert mini_remaining("codex", codex, claude) == 40
+    assert mini_remaining("claude", codex, claude) == 10
+    assert mini_remaining("min", codex, claude) == 10
+
+
+def test_mini_source_falls_back_when_provider_has_no_data() -> None:
+    codex = snapshot(60, 2_000)
+    empty_claude = ClaudeUsageSnapshot.unavailable(installed=True)
+    assert mini_remaining("claude", codex, empty_claude) == 40
+    assert mini_remaining("claude", codex, None) == 40
+    assert mini_remaining("codex", None, claude_snapshot(20, 50)) == 50
+    assert mini_remaining("min", None, None) == 0.0
+
+
+def make_exe(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
+    return path
+
+
+def test_scan_skips_the_desktop_gui_and_picks_the_cli(tmp_path: Path) -> None:
+    make_exe(tmp_path / "AnthropicClaude" / "claude.exe")
+    cli = make_exe(tmp_path / "Claude" / "claude-code" / "2.1.5" / "claude.exe")
+    assert ClaudeCliLocator._scan([tmp_path]) == cli
+
+
+def test_scan_prefers_newest_version_and_native_exe(tmp_path: Path) -> None:
+    make_exe(tmp_path / "claude-code" / "2.1.9" / "claude.cmd")
+    make_exe(tmp_path / "claude-code" / "2.1.30" / "claude.exe")
+    newest = make_exe(tmp_path / "claude-code" / "2.1.100" / "claude.exe")
+    assert ClaudeCliLocator._scan([tmp_path]) == newest
+
+
+def test_scan_respects_depth_limit(tmp_path: Path) -> None:
+    deep = make_exe(tmp_path / "a" / "b" / "c" / "d" / "e" / "claude.exe")
+    assert ClaudeCliLocator._scan([tmp_path], max_depth=3) is None
+    assert ClaudeCliLocator._scan([tmp_path], max_depth=9) == deep
+
+
+def test_scan_returns_none_when_nothing_matches(tmp_path: Path) -> None:
+    make_exe(tmp_path / "other" / "codex.exe")
+    assert ClaudeCliLocator._scan([tmp_path]) is None
+    assert ClaudeCliLocator._scan([tmp_path / "missing"]) is None
 
 
 def test_manual_override_wins_over_search(tmp_path: Path, monkeypatch) -> None:

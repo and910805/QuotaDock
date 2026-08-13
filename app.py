@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 
 
 APP_NAME = "QuotaDock"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.2.0"
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "CodexUsageWidget"
 STATE_PATH = APP_DIR / "usage_state.json"
 CLAUDE_STATE_PATH = APP_DIR / "claude_usage_state.json"
@@ -48,6 +48,18 @@ CREATE_NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
 # npm 全域安裝在 Windows 產生的是這類包裝檔，不是原生 exe。
 SHIM_SUFFIXES = {".cmd", ".bat", ".ps1"}
 CLAUDE_CLI_SETTING = "claude/cliPath"
+SCAN_TARGETS = {"claude.exe", "claude.cmd", "claude.bat"}
+# AnthropicClaude 是桌面版 GUI，它的執行檔也叫 claude.exe，但不吃 CLI 參數，跑下去只會彈視窗。
+# 比對單層目錄名而非整條路徑，免得像 AppData\Local\Temp 這種父層被誤殺。
+SCAN_SKIP_DIRS = {"anthropicclaude", "cache", ".bin"}
+
+
+def _version_key(name: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for chunk in name.split("."):
+        digits = "".join(c for c in chunk if c.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
 
 
 @dataclass(frozen=True)
@@ -194,6 +206,36 @@ def _parse_iso_timestamp(value: Any) -> int | None:
         return int(datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp())
     except ValueError:
         return None
+
+
+def mini_remaining(
+    source: str,
+    codex: UsageSnapshot | None,
+    claude: "ClaudeUsageSnapshot | None",
+) -> float:
+    """懸浮圖示要顯示的剩餘百分比；指定來源沒資料時退回看得到的那邊。"""
+
+    def codex_values() -> list[float]:
+        if codex and codex.primary:
+            return [codex.primary.remaining_percent]
+        return []
+
+    def claude_values() -> list[float]:
+        if claude is None:
+            return []
+        return [
+            window.remaining_percent
+            for window in (claude.five_hour, claude.seven_day)
+            if window is not None
+        ]
+
+    if source == "codex":
+        values = codex_values() or claude_values()
+    elif source == "claude":
+        values = claude_values() or codex_values()
+    else:
+        values = codex_values() + claude_values()
+    return min(values) if values else 0.0
 
 
 def detect_window_reset(previous: UsageWindow | None, current: UsageWindow | None) -> bool:
@@ -452,7 +494,46 @@ class ClaudeCliLocator:
             for candidate in candidates:
                 if candidate.suffix.lower() in suffixes and candidate.is_file():
                     return candidate
-        return None
+
+        # 已知路徑全部落空，才去掃描；掃到的結果記起來，下次不用再掃。
+        scanned = ClaudeCliLocator._scan([local_app_data, app_data, home / ".local", home / ".claude"])
+        if scanned:
+            QSettings("EricTools", "CodexUsageWidget").setValue(CLAUDE_CLI_SETTING, str(scanned))
+        return scanned
+
+    @staticmethod
+    def _scan(roots: list[Path], max_depth: int = 4, limit: int = 40) -> Path | None:
+        found: list[Path] = []
+        for root in roots:
+            if not root.is_dir():
+                continue
+            base = len(root.parts)
+            for dirpath, dirnames, filenames in os.walk(root):
+                current = Path(dirpath)
+                if current.name.lower() in SCAN_SKIP_DIRS:
+                    dirnames.clear()
+                    continue
+                if len(current.parts) - base >= max_depth:
+                    dirnames.clear()
+                    continue
+                for name in filenames:
+                    if name.lower() in SCAN_TARGETS:
+                        found.append(current / name)
+                if len(found) >= limit:
+                    break
+        if not found:
+            return None
+
+        def rank(path: Path) -> tuple[int, int, tuple[int, ...]]:
+            text = str(path).lower()
+            return (
+                0 if "claude-code" in text else 1,
+                0 if path.suffix.lower() == ".exe" else 1,
+                # 同一套安裝可能留著多個版本目錄，取版本號大的。
+                tuple(-part for part in _version_key(path.parent.name)),
+            )
+
+        return sorted(found, key=rank)[0]
 
     @staticmethod
     def command(cli: Path, args: list[str]) -> list[str]:
@@ -478,15 +559,9 @@ class ClaudeCliLocator:
         if not root.is_dir():
             return []
 
-        def version_key(path: Path) -> tuple[int, ...]:
-            parts: list[int] = []
-            for chunk in path.name.split("."):
-                digits = "".join(c for c in chunk if c.isdigit())
-                parts.append(int(digits) if digits else 0)
-            return tuple(parts)
-
         versions = [child for child in root.iterdir() if child.is_dir()]
-        return [child / "claude.exe" for child in sorted(versions, key=version_key, reverse=True)]
+        ordered = sorted(versions, key=lambda child: _version_key(child.name), reverse=True)
+        return [child / "claude.exe" for child in ordered]
 
 
 class ClaudeUsageClient:
@@ -854,6 +929,18 @@ class SettingsDialog(QDialog):
         )
         layout.addWidget(self.bubble_duration)
 
+        layout.addWidget(QLabel("懸浮圖示顯示的數值"))
+        self.mini_source = QComboBox()
+        for label, value in [
+            ("兩者取最低", "min"),
+            ("只看 Codex", "codex"),
+            ("只看 Claude Code", "claude"),
+        ]:
+            self.mini_source.addItem(label, value)
+        source_value = str(settings.value("mini_source", "min"))
+        self.mini_source.setCurrentIndex(max(0, self.mini_source.findData(source_value)))
+        layout.addWidget(self.mini_source)
+
         self.autostart = QCheckBox("登入 Windows 時自動啟動")
         self.autostart.setChecked(_setting_bool(settings, "autostart", True))
         layout.addWidget(self.autostart)
@@ -876,6 +963,7 @@ class SettingsDialog(QDialog):
         self.settings.setValue("notify_every_five", self.notify_every_five.isChecked())
         self.settings.setValue("notify_low", self.notify_low.isChecked())
         self.settings.setValue("bubble_duration", self.bubble_duration.currentData())
+        self.settings.setValue("mini_source", self.mini_source.currentData())
         self.settings.setValue("autostart", self.autostart.isChecked())
         configure_autostart(self.autostart.isChecked())
         self.settings.sync()
@@ -1242,17 +1330,10 @@ class UsageWidget(QWidget):
         self.tray.setToolTip(self._tray_tooltip())
 
     def _update_mini_usage(self) -> None:
-        values: list[float] = []
-        if self._snapshot and self._snapshot.primary:
-            values.append(self._snapshot.primary.remaining_percent)
-        if self._claude_snapshot:
-            for window in (
-                self._claude_snapshot.five_hour,
-                self._claude_snapshot.seven_day,
-            ):
-                if window is not None:
-                    values.append(window.remaining_percent)
-        self.mini.set_remaining(min(values) if values else 0)
+        source = _setting_str(self.settings, "mini_source") or "min"
+        self.mini.set_remaining(
+            mini_remaining(source, self._snapshot, self._claude_snapshot)
+        )
 
     def _render_codex(self, snapshot: UsageSnapshot) -> None:
         plan_label = snapshot.plan_type.upper().replace("_", " ")
@@ -1496,6 +1577,7 @@ class UsageWidget(QWidget):
     def _apply_timer_setting(self) -> None:
         interval = int(self.settings.value("refresh_interval", 300))
         self.timer.start(max(60, interval) * 1000)
+        self._update_mini_usage()
 
     def open_settings(self) -> None:
         if self.mini.isVisible():
