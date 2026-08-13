@@ -37,8 +37,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = $env:GITHUB_REF_NAME
+          $ErrorActionPreference = 'SilentlyContinue'
           gh release view $tag 2>$null
-          if ($LASTEXITCODE -eq 0) {
+          $releaseExists = $LASTEXITCODE -eq 0
+          $ErrorActionPreference = 'Stop'
+          if ($releaseExists) {
             gh release upload $tag release\QuotaDock-Windows-x64.exe --clobber
           } else {
             gh release create $tag release\QuotaDock-Windows-x64.exe --verify-tag --generate-notes --title "QuotaDock $tag"
