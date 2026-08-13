@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -37,13 +38,16 @@ from PySide6.QtWidgets import (
 
 
 APP_NAME = "QuotaDock"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "CodexUsageWidget"
 STATE_PATH = APP_DIR / "usage_state.json"
 CLAUDE_STATE_PATH = APP_DIR / "claude_usage_state.json"
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # 登入要走瀏覽器授權並在主控台顯示提示，必須給它一個看得到的視窗。
 CREATE_NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+# npm 全域安裝在 Windows 產生的是這類包裝檔，不是原生 exe。
+SHIM_SUFFIXES = {".cmd", ".bat", ".ps1"}
+CLAUDE_CLI_SETTING = "claude/cliPath"
 
 
 @dataclass(frozen=True)
@@ -405,6 +409,10 @@ class ClaudeCliLocator:
         if override and Path(override).is_file():
             return Path(override)
 
+        manual = _setting_str(QSettings("EricTools", "CodexUsageWidget"), CLAUDE_CLI_SETTING)
+        if manual and Path(manual).is_file():
+            return Path(manual)
+
         candidates: list[Path] = []
         for command in ("claude.exe", "claude"):
             located = shutil.which(command)
@@ -439,10 +447,30 @@ class ClaudeCliLocator:
             ]
         )
         candidates.extend(ClaudeCliLocator._desktop_managed(app_data / "Claude" / "claude-code"))
-        for candidate in candidates:
-            if candidate.suffix.lower() == ".exe" and candidate.is_file():
-                return candidate
+        # 原生執行檔優先，找不到才退回 npm 之類的批次包裝檔。
+        for suffixes in ({".exe"}, SHIM_SUFFIXES):
+            for candidate in candidates:
+                if candidate.suffix.lower() in suffixes and candidate.is_file():
+                    return candidate
         return None
+
+    @staticmethod
+    def command(cli: Path, args: list[str]) -> list[str]:
+        """批次或 PowerShell 包裝檔不能直接交給 CreateProcess，要用直譯器帶起來。"""
+        suffix = cli.suffix.lower()
+        if suffix in {".cmd", ".bat"}:
+            return ["cmd.exe", "/c", str(cli), *args]
+        if suffix == ".ps1":
+            return [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(cli),
+                *args,
+            ]
+        return [str(cli), *args]
 
     @staticmethod
     def _desktop_managed(root: Path) -> list[Path]:
@@ -488,17 +516,19 @@ class ClaudeUsageClient:
             separators=(",", ":"),
         )
         completed = subprocess.run(
-            [
-                str(cli),
-                "-p",
-                "--safe-mode",
-                "--input-format",
-                "stream-json",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--no-session-persistence",
-            ],
+            ClaudeCliLocator.command(
+                cli,
+                [
+                    "-p",
+                    "--safe-mode",
+                    "--input-format",
+                    "stream-json",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                    "--no-session-persistence",
+                ],
+            ),
             input=request + "\n",
             capture_output=True,
             text=True,
@@ -527,7 +557,7 @@ class ClaudeUsageClient:
 
     def _auth_status(self, cli: Path) -> dict[str, Any]:
         completed = subprocess.run(
-            [str(cli), "auth", "status", "--json"],
+            ClaudeCliLocator.command(cli, ["auth", "status", "--json"]),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -863,6 +893,7 @@ class UsageWidget(QWidget):
         self.signals.login_finished.connect(self._on_claude_login_finished)
         self._fetching = False
         self._claude_logging_in = False
+        self._claude_action = "login"
         self._drag_offset: QPoint | None = None
         self._snapshot: UsageSnapshot | None = None
         self._claude_snapshot: ClaudeUsageSnapshot | None = None
@@ -999,7 +1030,7 @@ class UsageWidget(QWidget):
         self.claude_login_button = QPushButton("登入 Claude Code")
         self.claude_login_button.setObjectName("claudeLoginButton")
         self.claude_login_button.setAccessibleName("開啟 Claude Code 登入流程")
-        self.claude_login_button.clicked.connect(self._start_claude_login)
+        self.claude_login_button.clicked.connect(self._on_claude_button_clicked)
         self.claude_login_button.hide()
         claude_layout.addWidget(self.claude_login_button)
 
@@ -1119,12 +1150,32 @@ class UsageWidget(QWidget):
         self.error_label.setText(message)
         self.error_label.show()
 
+    def _on_claude_button_clicked(self) -> None:
+        if self._claude_action == "locate":
+            self._pick_claude_cli()
+        else:
+            self._start_claude_login()
+
+    def _pick_claude_cli(self) -> None:
+        if self._demo:
+            return
+        chosen, _ = QFileDialog.getOpenFileName(
+            self,
+            "選擇 Claude Code 執行檔",
+            str(Path(os.environ.get("APPDATA", str(Path.home()))) / "Claude" / "claude-code"),
+            "Claude Code (claude.exe claude.cmd claude.bat);;所有檔案 (*)",
+        )
+        if not chosen:
+            return
+        self.settings.setValue(CLAUDE_CLI_SETTING, chosen)
+        self.refresh()
+
     def _start_claude_login(self) -> None:
         if self._claude_logging_in or self._demo:
             return
         cli = ClaudeCliLocator.locate()
         if cli is None:
-            self._show_error("找不到 Claude Code 執行檔，請先安裝或設定 CLAUDE_USAGE_CLI。")
+            self._show_error("找不到 Claude Code 執行檔，請先安裝或手動指定路徑。")
             return
 
         self._claude_logging_in = True
@@ -1136,7 +1187,7 @@ class UsageWidget(QWidget):
             try:
                 # 授權流程需要使用者互動，開一個獨立主控台讓他們看得到並操作。
                 process = subprocess.Popen(
-                    [str(cli), "auth", "login"],
+                    ClaudeCliLocator.command(cli, ["auth", "login"]),
                     creationflags=CREATE_NEW_CONSOLE,
                 )
                 process.wait()
@@ -1226,9 +1277,17 @@ class UsageWidget(QWidget):
         self.claude_login_button.hide()
         if not snapshot.installed:
             self.claude_badge.setText("未安裝")
-            self.claude_status.setText("安裝並登入 Claude Code 後，這裡會自動顯示用量。")
+            self.claude_status.setText(
+                "找不到 Claude Code 執行檔。裝好後按「立即更新」，"
+                "或用下方按鈕直接指定 claude 的位置。"
+            )
+            self._claude_action = "locate"
+            self.claude_login_button.setText("指定 claude 執行檔")
+            self.claude_login_button.show()
             return
         if not snapshot.logged_in:
+            self._claude_action = "login"
+            self.claude_login_button.setText("登入 Claude Code")
             self.claude_badge.setText("未登入")
             self.claude_status.setText(
                 "只在 Claude 桌面版登入不會建立 CLI 憑證。"
@@ -1570,6 +1629,11 @@ def claude_snapshot_from_state(raw: dict[str, Any]) -> ClaudeUsageSnapshot:
         seven_day_opus=window(raw.get("seven_day_opus")),
         fetched_at=int(raw.get("fetched_at", 0)),
     )
+
+
+def _setting_str(settings: QSettings, key: str) -> str:
+    value = settings.value(key, "")
+    return str(value or "").strip()
 
 
 def _setting_bool(settings: QSettings, key: str, default: bool) -> bool:

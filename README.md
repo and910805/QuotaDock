@@ -52,7 +52,11 @@
 
 此時 Claude Code 卡片會出現「登入 Claude Code」按鈕。按下去會開一個主控台視窗跑登入流程，在瀏覽器完成授權、視窗關閉後 QuotaDock 會自動重新讀取額度，不需要自己打指令。
 
-CLI 的搜尋順序是 PATH、npm 安裝目錄，以及 Claude 桌面版管理的 `%APPDATA%\Claude\claude-code\<版本>\claude.exe`（取版本最新者）。若安裝路徑特殊導致找不到，可用環境變數 `CLAUDE_USAGE_CLI` 直接指定執行檔。
+CLI 的搜尋順序是 PATH、npm 安裝目錄，以及 Claude 桌面版管理的 `%APPDATA%\Claude\claude-code\<版本>\claude.exe`（取版本最新者）。原生 `claude.exe` 優先，找不到才退回 npm 產生的 `claude.cmd` 之類包裝檔。
+
+### Claude Code 額度顯示「未安裝」
+
+代表上述路徑都沒找到 CLI。卡片會出現「指定 claude 執行檔」按鈕，可以直接選檔案，選好後路徑會記住並自動重新讀取。也可以改用環境變數 `CLAUDE_USAGE_CLI` 指定。
 
 ## 從原始碼開發
 

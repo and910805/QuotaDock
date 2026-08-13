@@ -94,6 +94,23 @@ def test_desktop_managed_cli_missing_root(tmp_path: Path) -> None:
     assert ClaudeCliLocator._desktop_managed(tmp_path / "nope") == []
 
 
+def test_batch_shims_run_through_an_interpreter(tmp_path: Path) -> None:
+    assert ClaudeCliLocator.command(tmp_path / "claude.exe", ["auth"]) == [
+        str(tmp_path / "claude.exe"),
+        "auth",
+    ]
+    assert ClaudeCliLocator.command(tmp_path / "claude.cmd", ["auth"])[:2] == ["cmd.exe", "/c"]
+    assert ClaudeCliLocator.command(tmp_path / "claude.ps1", ["auth"])[0] == "powershell.exe"
+
+
+def test_manual_override_wins_over_search(tmp_path: Path, monkeypatch) -> None:
+    manual = tmp_path / "somewhere" / "claude.exe"
+    manual.parent.mkdir()
+    manual.touch()
+    monkeypatch.setenv("CLAUDE_USAGE_CLI", str(manual))
+    assert ClaudeCliLocator.locate() == manual
+
+
 def test_claude_usage_response_parsing() -> None:
     value = ClaudeUsageSnapshot.from_response(
         {
