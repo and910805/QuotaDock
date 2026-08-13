@@ -7,6 +7,7 @@ import math
 import os
 import queue
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -38,7 +39,7 @@ from PySide6.QtWidgets import (
 
 
 APP_NAME = "QuotaDock"
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.2.3"
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "CodexUsageWidget"
 STATE_PATH = APP_DIR / "usage_state.json"
 CLAUDE_STATE_PATH = APP_DIR / "claude_usage_state.json"
@@ -52,6 +53,20 @@ SCAN_TARGETS = {"claude.exe", "claude.cmd", "claude.bat"}
 # AnthropicClaude 是桌面版 GUI，它的執行檔也叫 claude.exe，但不吃 CLI 參數，跑下去只會彈視窗。
 # 比對單層目錄名而非整條路徑，免得像 AppData\Local\Temp 這種父層被誤殺。
 SCAN_SKIP_DIRS = {"anthropicclaude", "cache", ".bin"}
+# Segoe UI Variable 沒有中文字面，只靠 Qt 自動 fallback 會挑到跟拉丁字重、
+# 基線都不搭的字體（中文看起來偏細偏舊），所以把中文 UI 字體直接排進來。
+UI_FONT_STACK = ("Segoe UI Variable", "Microsoft JhengHei UI", "Segoe UI")
+UI_FONT_CSS = ", ".join(f'"{name}"' for name in UI_FONT_STACK)
+
+
+def ui_font(point_size: int, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
+    """畫在 QPainter 上的文字也要吃同一套字體堆疊，否則中英文會兩種味道。"""
+    font = QFont()
+    font.setFamilies(list(UI_FONT_STACK))
+    font.setPointSize(point_size)
+    font.setWeight(weight)
+    font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+    return font
 
 
 def _version_key(name: str) -> tuple[int, ...]:
@@ -446,14 +461,59 @@ class CodexUsageClient:
 
 class ClaudeCliLocator:
     @staticmethod
-    def locate() -> Path | None:
-        override = os.environ.get("CLAUDE_USAGE_CLI")
-        if override and Path(override).is_file():
-            return Path(override)
+    def _probe(path: Path) -> bool | None:
+        """True=確定是檔案，False=確定不在，None=問不出來。
 
-        manual = _setting_str(QSettings("EricTools", "CodexUsageWidget"), CLAUDE_CLI_SETTING)
-        if manual and Path(manual).is_file():
-            return Path(manual)
+        Path.is_file() 會把所有 OSError 都吞成 False，所以防毒掛在 CreateFile
+        上、檔案被鎖、或任何一次 I/O 抖動，看起來都跟「沒安裝」一模一樣。
+        分開回報才能讓上層決定要顯示「未安裝」還是「稍後再試」。
+        """
+        try:
+            return stat.S_ISREG(os.stat(path).st_mode)
+        except (FileNotFoundError, NotADirectoryError):
+            return False
+        except OSError as exc:
+            ClaudeCliLocator._log(f"stat {path} -> {exc.__class__.__name__} {exc}")
+            return None
+
+    @staticmethod
+    def _log(message: str) -> None:
+        """只在查不到時寫一行，方便事後回頭看是哪個 syscall 出錯。"""
+        try:
+            APP_DIR.mkdir(parents=True, exist_ok=True)
+            with (APP_DIR / "claude_locate.log").open("a", encoding="utf-8") as handle:
+                handle.write(f"{datetime.now().isoformat(timespec='seconds')} {message}\n")
+        except OSError:
+            pass
+
+    @staticmethod
+    def locate() -> Path | None:
+        return ClaudeCliLocator.locate_detailed()[0]
+
+    @staticmethod
+    def locate_detailed() -> tuple[Path | None, bool]:
+        """回傳 (執行檔, 這次查詢是否不可靠)。"""
+        settings = QSettings("EricTools", "CodexUsageWidget")
+        inconclusive = False
+        home = Path.home()
+        local_app_data = Path(os.environ.get("LOCALAPPDATA", str(home)))
+        app_data = Path(os.environ.get("APPDATA", str(home)))
+
+        for known in (os.environ.get("CLAUDE_USAGE_CLI"), _setting_str(settings, CLAUDE_CLI_SETTING)):
+            if not known:
+                continue
+            if ClaudeCliLocator._is_msix_projection(Path(known)):
+                # 舊版可能記下 %APPDATA% 那條投影路徑，時好時壞；換成套件裡的真身。
+                for real in ClaudeCliLocator._packaged_managed(local_app_data / "Packages"):
+                    if ClaudeCliLocator._probe(real):
+                        settings.setValue(CLAUDE_CLI_SETTING, str(real))
+                        return real, False
+            state = ClaudeCliLocator._probe(Path(known))
+            if state:
+                return Path(known), False
+            # 記過的路徑問不出來：還是往下找，但要記住這次查詢不可靠，
+            # 免得一次 I/O 抖動就把面板打回「未安裝」。
+            inconclusive = inconclusive or state is None
 
         candidates: list[Path] = []
         for command in ("claude.exe", "claude"):
@@ -471,9 +531,6 @@ class ClaudeCliLocator:
                         / "claude.exe"
                     )
 
-        home = Path.home()
-        local_app_data = Path(os.environ.get("LOCALAPPDATA", str(home)))
-        app_data = Path(os.environ.get("APPDATA", str(home)))
         candidates.extend(
             [
                 home / ".local" / "bin" / "claude.exe",
@@ -488,18 +545,29 @@ class ClaudeCliLocator:
                 / "claude.exe",
             ]
         )
+        # MSIX 封裝的桌面版要先用套件內的真實路徑，%APPDATA% 那條只是投影。
+        candidates.extend(ClaudeCliLocator._packaged_managed(local_app_data / "Packages"))
         candidates.extend(ClaudeCliLocator._desktop_managed(app_data / "Claude" / "claude-code"))
         # 原生執行檔優先，找不到才退回 npm 之類的批次包裝檔。
         for suffixes in ({".exe"}, SHIM_SUFFIXES):
             for candidate in candidates:
-                if candidate.suffix.lower() in suffixes and candidate.is_file():
+                if candidate.suffix.lower() not in suffixes:
+                    continue
+                state = ClaudeCliLocator._probe(candidate)
+                if state:
+                    # 記起來：下次直接命中，之後的抖動就不會再退回「未安裝」。
+                    settings.setValue(CLAUDE_CLI_SETTING, str(candidate))
                     return candidate
+                inconclusive = inconclusive or state is None
 
         # 已知路徑全部落空，才去掃描；掃到的結果記起來，下次不用再掃。
         scanned = ClaudeCliLocator._scan([local_app_data, app_data, home / ".local", home / ".claude"])
         if scanned:
-            QSettings("EricTools", "CodexUsageWidget").setValue(CLAUDE_CLI_SETTING, str(scanned))
-        return scanned
+            settings.setValue(CLAUDE_CLI_SETTING, str(scanned))
+            return scanned, False
+        if inconclusive:
+            ClaudeCliLocator._log("找不到執行檔，且過程中有 stat 失敗，視為暫時性失敗")
+        return None, inconclusive
 
     @staticmethod
     def _scan(roots: list[Path], max_depth: int = 4, limit: int = 40) -> Path | None:
@@ -554,12 +622,47 @@ class ClaudeCliLocator:
         return [str(cli), *args]
 
     @staticmethod
-    def _desktop_managed(root: Path) -> list[Path]:
-        """Claude 桌面版把 CLI 裝在 <APPDATA>/Claude/claude-code/<版本>/，且不加入 PATH。"""
-        if not root.is_dir():
+    def _is_msix_projection(path: Path) -> bool:
+        """%APPDATA%\\Claude\\claude-code 是 MSIX 投影，不是真的目錄項目。"""
+        parts = [part.lower() for part in path.parts]
+        return "claude-code" in parts and "roaming" in parts and "packages" not in parts
+
+    @staticmethod
+    def _packaged_managed(packages_root: Path) -> list[Path]:
+        """桌面版若是 MSIX 安裝，CLI 的真身在套件的 LocalCache 底下。
+
+        %APPDATA%\\Claude 只是 MSIX 幫套件做的重導向投影：它由檔案系統篩選器
+        產生，不是真的目錄項目（fsutil hardlink list 只會列出 LocalCache 那條），
+        非封裝的程序不保證看得到，提升權限後更常直接消失。真實路徑是普通檔案，
+        所以要排在投影路徑前面。
+        """
+        try:
+            packages = sorted(packages_root.glob("Claude_*"))
+        except OSError as exc:
+            ClaudeCliLocator._log(f"glob {packages_root} -> {exc.__class__.__name__} {exc}")
             return []
 
-        versions = [child for child in root.iterdir() if child.is_dir()]
+        found: list[Path] = []
+        for package in packages:
+            found.extend(
+                ClaudeCliLocator._desktop_managed(
+                    package / "LocalCache" / "Roaming" / "Claude" / "claude-code"
+                )
+            )
+        return found
+
+    @staticmethod
+    def _desktop_managed(root: Path) -> list[Path]:
+        """Claude 桌面版把 CLI 裝在 <APPDATA>/Claude/claude-code/<版本>/，且不加入 PATH。"""
+        try:
+            versions = [child for child in root.iterdir() if child.is_dir()]
+        except (FileNotFoundError, NotADirectoryError):
+            return []
+        except OSError as exc:
+            # 目錄在、但列不出來：記一行，否則這種失敗會安靜地變成「未安裝」。
+            ClaudeCliLocator._log(f"iterdir {root} -> {exc.__class__.__name__} {exc}")
+            return []
+
         ordered = sorted(versions, key=lambda child: _version_key(child.name), reverse=True)
         return [child / "claude.exe" for child in ordered]
 
@@ -569,8 +672,11 @@ class ClaudeUsageClient:
         self.timeout_seconds = timeout_seconds
 
     def fetch(self) -> ClaudeUsageSnapshot:
-        cli = ClaudeCliLocator.locate()
+        cli, inconclusive = ClaudeCliLocator.locate_detailed()
         if cli is None:
+            if inconclusive:
+                # 查詢本身失敗（防毒攔截、檔案被鎖、I/O 抖動）：不要冤枉成未安裝。
+                raise RuntimeError("暫時查不到 Claude Code 執行檔，下次自動更新會再試一次。")
             return ClaudeUsageSnapshot.unavailable(installed=False)
 
         auth = self._auth_status(cli)
@@ -683,14 +789,12 @@ class UsageRing(QWidget):
         painter.drawArc(rect, 90 * 16, int(-360 * 16 * self._remaining / 100))
 
         painter.setPen(QColor("#F8FAFC"))
-        value_font = QFont("Segoe UI Variable", 31, QFont.Weight.Bold)
-        value_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
-        painter.setFont(value_font)
+        painter.setFont(ui_font(32, QFont.Weight.Bold))
         value_rect = QRectF(0, self.height() / 2 - 36, self.width(), 58)
         painter.drawText(value_rect, Qt.AlignmentFlag.AlignCenter, percent_text(self._remaining))
 
         painter.setPen(QColor("#94A3B8"))
-        painter.setFont(QFont("Segoe UI Variable", 10, QFont.Weight.Medium))
+        painter.setFont(ui_font(11, QFont.Weight.Medium))
         label_rect = QRectF(0, self.height() / 2 + 22, self.width(), 25)
         painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, "剩餘可用")
 
@@ -709,11 +813,11 @@ class AlertBubble(QFrame):
         self.setStyleSheet(
             """
             #bubbleShell { background: #111C2E; border: 1px solid #3A4B65; border-radius: 15px; }
-            #bubbleTitle { color: #F8FAFC; font-family: 'Segoe UI Variable'; font-size: 13px; font-weight: 750; }
-            #bubbleMessage { color: #CBD5E1; font-family: 'Segoe UI Variable'; font-size: 11px; }
+            #bubbleTitle { color: #F8FAFC; font-family: __FONTS__; font-size: 14px; font-weight: 750; }
+            #bubbleMessage { color: #CBD5E1; font-family: __FONTS__; font-size: 12px; }
             #bubbleClose { min-width: 28px; max-width: 28px; min-height: 28px; max-height: 28px; border: 0; border-radius: 8px; background: transparent; color: #94A3B8; font-size: 16px; }
             #bubbleClose:hover { background: #223047; color: #FFFFFF; }
-            """
+            """.replace("__FONTS__", UI_FONT_CSS)
         )
         shell = QFrame(self)
         shell.setObjectName("bubbleShell")
@@ -803,7 +907,7 @@ class MiniUsageWidget(QWidget):
         painter.setPen(QPen(self.accent(), 6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         painter.drawArc(ring, 90 * 16, round(-360 * 16 * self._remaining / 100))
         painter.setPen(QColor("#F8FAFC"))
-        painter.setFont(QFont("Segoe UI Variable", 13, QFont.Weight.Bold))
+        painter.setFont(ui_font(13, QFont.Weight.Bold))
         painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, percent_text(self._remaining))
 
     def show_docked(self) -> None:
@@ -1042,13 +1146,12 @@ class UsageWidget(QWidget):
         header.addWidget(brand)
         header.addStretch()
 
-        self.pin_button = QPushButton("固定")
+        self.pin_button = QPushButton()
         self.pin_button.setObjectName("textButton")
         self.pin_button.setCheckable(True)
         self.pin_button.setChecked(True)
-        self.pin_button.setToolTip("保持在其他視窗上方")
-        self.pin_button.setAccessibleName("切換固定在最上層")
         self.pin_button.clicked.connect(self._toggle_pin)
+        self._apply_pin_label(True)
         header.addWidget(self.pin_button)
 
         self.hide_button = QPushButton("—")
@@ -1253,7 +1356,7 @@ class UsageWidget(QWidget):
         chosen, _ = QFileDialog.getOpenFileName(
             self,
             "選擇 Claude Code 執行檔",
-            str(Path(os.environ.get("APPDATA", str(Path.home()))) / "Claude" / "claude-code"),
+            _claude_browse_dir(),
             "Claude Code (claude.exe claude.cmd claude.bat);;所有檔案 (*)",
         )
         if not chosen:
@@ -1601,9 +1704,22 @@ class UsageWidget(QWidget):
         dialog.settings_changed.connect(self._apply_timer_setting)
         dialog.exec()
 
+    def _apply_pin_label(self, checked: bool) -> None:
+        """按鈕上寫的是「現在的狀態」，說明留給提示，免得看不出按了會變什麼。"""
+        self.pin_button.setText("已置頂" if checked else "未置頂")
+        self.pin_button.setToolTip(
+            "目前一直顯示在其他視窗上方，點一下取消置頂。"
+            if checked
+            else "目前會被其他視窗蓋住，點一下改成永遠顯示在最上層。"
+        )
+        self.pin_button.setAccessibleName("切換視窗置頂")
+        self.pin_button.setAccessibleDescription(
+            "已置頂" if checked else "未置頂"
+        )
+
     def _toggle_pin(self, checked: bool) -> None:
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, checked)
-        self.pin_button.setText("固定" if checked else "一般")
+        self._apply_pin_label(checked)
         self.show()
 
     def collapse_to_mini(self) -> None:
@@ -1726,6 +1842,17 @@ def claude_snapshot_from_state(raw: dict[str, Any]) -> ClaudeUsageSnapshot:
         seven_day_opus=window(raw.get("seven_day_opus")),
         fetched_at=int(raw.get("fetched_at", 0)),
     )
+
+
+def _claude_browse_dir() -> str:
+    """讓「指定執行檔」的對話框開在真的看得到檔案的那層。"""
+    home = Path.home()
+    packaged = ClaudeCliLocator._packaged_managed(
+        Path(os.environ.get("LOCALAPPDATA", str(home))) / "Packages"
+    )
+    if packaged:
+        return str(packaged[0].parent)
+    return str(Path(os.environ.get("APPDATA", str(home))) / "Claude" / "claude-code")
 
 
 def _setting_str(settings: QSettings, key: str) -> str:
@@ -1893,23 +2020,23 @@ def _demo_claude_snapshot() -> ClaudeUsageSnapshot:
 
 
 APP_STYLE = """
-QWidget { color: #F8FAFC; font-family: "Segoe UI Variable", "Segoe UI"; font-size: 13px; }
+QWidget { color: #F8FAFC; font-family: __FONTS__; font-size: 14px; }
 #shell { background: #0B1220; border: 1px solid #26344A; border-radius: 24px; }
-#brand { font-size: 16px; font-weight: 700; letter-spacing: 1px; }
-#providerName { color: #E2E8F0; font-size: 12px; font-weight: 800; letter-spacing: 1px; }
-#planBadge { color: #0B1220; background: #35E28A; border-radius: 9px; padding: 3px 9px; font-size: 11px; font-weight: 800; }
-#muted { color: #94A3B8; font-size: 11px; }
-#usedLabel { color: #CBD5E1; font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+#brand { font-size: 17px; font-weight: 700; letter-spacing: 1px; }
+#providerName { color: #E2E8F0; font-size: 13px; font-weight: 800; letter-spacing: 1px; }
+#planBadge { color: #0B1220; background: #35E28A; border-radius: 9px; padding: 3px 9px; font-size: 12px; font-weight: 800; }
+#muted { color: #94A3B8; font-size: 12px; }
+#usedLabel { color: #CBD5E1; font-size: 15px; font-weight: 600; margin-bottom: 2px; }
 #infoCard { background: #111C2E; border: 1px solid #26344A; border-radius: 14px; }
-#cardTitle { color: #94A3B8; font-size: 11px; font-weight: 600; }
-#cardValue { color: #F8FAFC; font-size: 13px; font-weight: 650; }
+#cardTitle { color: #94A3B8; font-size: 12px; font-weight: 600; }
+#cardValue { color: #F8FAFC; font-size: 15px; font-weight: 650; }
 #claudeCard { background: #171A20; border: 1px solid #5B4935; border-radius: 14px; }
-#claudeName { color: #F3E8D5; font-size: 12px; font-weight: 800; letter-spacing: 1px; }
-#claudeBadge { color: #17120B; background: #D8A96A; border-radius: 9px; padding: 3px 9px; font-size: 10px; font-weight: 800; }
-#claudeStatus { color: #B8AA96; font-size: 11px; }
-#quotaName { color: #D9D1C5; font-size: 11px; font-weight: 600; }
-#quotaValue { color: #FFF8ED; font-size: 11px; font-weight: 700; }
-#quotaReset { color: #9E9283; font-size: 10px; }
+#claudeName { color: #F3E8D5; font-size: 13px; font-weight: 800; letter-spacing: 1px; }
+#claudeBadge { color: #17120B; background: #D8A96A; border-radius: 9px; padding: 3px 9px; font-size: 11px; font-weight: 800; }
+#claudeStatus { color: #B8AA96; font-size: 12px; }
+#quotaName { color: #D9D1C5; font-size: 12px; font-weight: 600; }
+#quotaValue { color: #FFF8ED; font-size: 13px; font-weight: 700; }
+#quotaReset { color: #9E9283; font-size: 11px; }
 #claudeProgress { border: 0; border-radius: 3px; background: #342D25; }
 #claudeProgress::chunk { border-radius: 3px; background: #D8A96A; }
 #errorLabel { color: #FCA5A5; background: #2A151A; border: 1px solid #7F1D1D; border-radius: 10px; padding: 8px; margin-top: 8px; }
@@ -1918,30 +2045,30 @@ QPushButton:hover { background: #57E99D; }
 QPushButton:pressed { background: #21C875; }
 QPushButton:focus { border: 2px solid #FFFFFF; }
 QPushButton:disabled { background: #26344A; color: #94A3B8; }
-#claudeLoginButton { min-height: 30px; border-radius: 9px; background: #D8A96A; color: #17120B; font-size: 11px; font-weight: 800; padding: 0 12px; }
+#claudeLoginButton { min-height: 32px; border-radius: 9px; background: #D8A96A; color: #17120B; font-size: 12px; font-weight: 800; padding: 0 12px; }
 #claudeLoginButton:hover { background: #E5BC85; }
 #claudeLoginButton:pressed { background: #C0904F; }
 #claudeLoginButton:disabled { background: #342D25; color: #B8AA96; }
 #secondaryButton { background: #182438; color: #E2E8F0; border: 1px solid #334155; }
 #secondaryButton:hover { background: #223047; }
-#textButton { min-width: 46px; min-height: 30px; padding: 0 8px; background: transparent; color: #94A3B8; font-size: 11px; border: 1px solid #26344A; border-radius: 9px; }
+#textButton { min-width: 62px; min-height: 30px; padding: 0 9px; background: transparent; color: #94A3B8; font-size: 12px; border: 1px solid #26344A; border-radius: 9px; }
 #textButton:checked { color: #35E28A; border-color: #2E8B61; background: #10271E; }
 #windowButton { min-width: 32px; max-width: 32px; min-height: 30px; padding: 0; background: transparent; color: #94A3B8; font-size: 18px; }
 #windowButton:hover { color: #FFFFFF; background: #1B293D; }
-QToolTip { background: #111C2E; color: #F8FAFC; border: 1px solid #334155; padding: 6px; }
-"""
+QToolTip { background: #111C2E; color: #F8FAFC; border: 1px solid #334155; padding: 6px; font-size: 12px; }
+""".replace("__FONTS__", UI_FONT_CSS)
 
 
 DIALOG_STYLE = """
-QDialog { background: #0B1220; color: #F8FAFC; }
-QLabel { color: #CBD5E1; font-family: "Segoe UI Variable", "Segoe UI"; }
-#dialogTitle { color: #F8FAFC; font-size: 20px; font-weight: 750; }
+QDialog { background: #0B1220; color: #F8FAFC; font-family: __FONTS__; font-size: 14px; }
+QLabel { color: #CBD5E1; font-family: __FONTS__; font-size: 14px; }
+#dialogTitle { color: #F8FAFC; font-size: 21px; font-weight: 750; }
 QComboBox { min-height: 38px; padding: 0 10px; border: 1px solid #334155; border-radius: 9px; background: #111C2E; color: #F8FAFC; }
 QComboBox QAbstractItemView { background: #111C2E; color: #F8FAFC; selection-background-color: #244B39; }
 QCheckBox { min-height: 30px; color: #E2E8F0; spacing: 9px; }
 QPushButton { min-height: 38px; border: 0; border-radius: 10px; background: #35E28A; color: #07130D; font-weight: 700; padding: 0 15px; }
 #secondaryButton { background: #182438; color: #E2E8F0; border: 1px solid #334155; }
-"""
+""".replace("__FONTS__", UI_FONT_CSS)
 
 
 def parse_args() -> argparse.Namespace:

@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import app as app_module
 from app import (
     ClaudeCliLocator,
     ClaudeUsageSnapshot,
@@ -173,6 +174,55 @@ def test_manual_override_wins_over_search(tmp_path: Path, monkeypatch) -> None:
     manual.touch()
     monkeypatch.setenv("CLAUDE_USAGE_CLI", str(manual))
     assert ClaudeCliLocator.locate() == manual
+
+
+def isolate_lookup(monkeypatch) -> None:
+    """把查找隔離在測試裡：不讀本機設定、不掃真實磁碟。"""
+    monkeypatch.setattr(app_module, "_setting_str", lambda settings, key: "")
+    monkeypatch.setattr(app_module.shutil, "which", lambda command: None)
+    monkeypatch.setattr(ClaudeCliLocator, "_desktop_managed", staticmethod(lambda root: []))
+    monkeypatch.setattr(ClaudeCliLocator, "_scan", staticmethod(lambda roots: None))
+
+
+def test_packaged_desktop_cli_is_found_in_localcache(tmp_path: Path) -> None:
+    """MSIX 桌面版的真身在 Packages\\<family>\\LocalCache\\Roaming 底下。"""
+    base = tmp_path / "Claude_pzs8sxrjxfjjc" / "LocalCache" / "Roaming" / "Claude" / "claude-code"
+    make_exe(base / "2.1.9" / "claude.exe")
+    newest = make_exe(base / "2.1.30" / "claude.exe")
+    make_exe(tmp_path / "OtherApp_abc" / "LocalCache" / "Roaming" / "Claude" / "claude-code" / "9.9.9" / "claude.exe")
+
+    found = ClaudeCliLocator._packaged_managed(tmp_path)
+    assert found[0] == newest
+    assert all("OtherApp_abc" not in str(path) for path in found)
+    assert ClaudeCliLocator._packaged_managed(tmp_path / "missing") == []
+
+
+def test_msix_projection_is_told_apart_from_the_real_file() -> None:
+    projection = Path(r"C:\Users\x\AppData\Roaming\Claude\claude-code\2.1.227\claude.exe")
+    real = Path(
+        r"C:\Users\x\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache"
+        r"\Roaming\Claude\claude-code\2.1.227\claude.exe"
+    )
+    assert ClaudeCliLocator._is_msix_projection(projection) is True
+    assert ClaudeCliLocator._is_msix_projection(real) is False
+    assert ClaudeCliLocator._is_msix_projection(Path(r"C:\tools\claude.exe")) is False
+
+
+def test_unreadable_candidate_is_reported_as_inconclusive(tmp_path: Path, monkeypatch) -> None:
+    """防毒或檔案鎖讓 stat 失敗時要說「問不出來」，不能報成未安裝。"""
+    isolate_lookup(monkeypatch)
+    manual = make_exe(tmp_path / "locked" / "claude.exe")
+    monkeypatch.setenv("CLAUDE_USAGE_CLI", str(manual))
+    monkeypatch.setattr(
+        app_module.os, "stat", lambda path, *a, **kw: (_ for _ in ()).throw(PermissionError(5, "存取被拒"))
+    )
+    assert ClaudeCliLocator.locate_detailed() == (None, True)
+
+
+def test_missing_candidate_is_still_reported_as_not_installed(tmp_path: Path, monkeypatch) -> None:
+    isolate_lookup(monkeypatch)
+    monkeypatch.setenv("CLAUDE_USAGE_CLI", str(tmp_path / "nope" / "claude.exe"))
+    assert ClaudeCliLocator.locate_detailed() == (None, False)
 
 
 def test_claude_usage_response_parsing() -> None:

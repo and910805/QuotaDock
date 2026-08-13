@@ -89,7 +89,7 @@ git clone https://github.com/and910805/QuotaDock.git
 | 點懸浮圓環 | 展開完整面板 |
 | 拖曳懸浮圓環 | 放開後自動貼齊最近的螢幕邊緣 |
 | 右鍵懸浮圓環 / 系統匣 | 立即更新、開啟設定、結束程式 |
-| 按右上角「固定 / 一般」 | 切換視窗是否保持在最上層 |
+| 按右上角「已置頂 / 未置頂」 | 切換面板是否永遠顯示在其他視窗上方（按鈕顯示的是目前狀態） |
 
 ## 設定選項
 
@@ -123,8 +123,13 @@ QuotaDock 依序嘗試：
 2. 先前記住的手動指定路徑
 3. PATH 上的 `claude`（原生 `.exe` 優先，其次 npm 的 `.cmd` 包裝檔）
 4. npm 全域安裝目錄
-5. Claude 桌面版管理的 `%APPDATA%\Claude\claude-code\<版本>\claude.exe`（取最新版本）
-6. 以上皆無 → **自動掃描**常見安裝根目錄（約 1–2 秒，結果會記住）
+5. MSIX 封裝的 Claude 桌面版：`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\claude-code\<版本>\claude.exe`（取最新版本）
+6. Claude 桌面版管理的 `%APPDATA%\Claude\claude-code\<版本>\claude.exe`（取最新版本）
+7. 以上皆無 → **自動掃描**常見安裝根目錄（約 1–2 秒，結果會記住）
+
+第 5 項要排在第 6 項前面：桌面版若是 MSIX 安裝，`%APPDATA%\Claude` 只是套件資料的重導向投影（`fsutil hardlink list` 只會列出 `LocalCache` 那條），非封裝的程序不保證看得到，提升權限後更常直接消失 — 這也是為什麼在系統管理員的 PowerShell 裡跑 `%APPDATA%` 那條路徑會得到 `CommandNotFoundException`。
+
+查詢失敗（防毒攔截、檔案被鎖、I/O 抖動）與「真的沒安裝」會分開處理：前者顯示 **「暫時無法讀取」** 並在 `%LOCALAPPDATA%\CodexUsageWidget\claude_locate.log` 記下失敗的 syscall 與 WinError，不會誤報成「未安裝」。
 
 仍找不到時，卡片會出現 **「指定 claude 執行檔」** 按鈕讓你直接選檔案。確定已安裝卻掃不到的話，請開 issue 告知安裝路徑。
 
