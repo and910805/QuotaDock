@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+build/
+release/
+*.spec
+
+# Local runtime and design captures
+actual.png
+demo.png
+final.png
+packaged.png
+dual-actual.png
+dual-demo.png
+dual-packaged.png
+
+# Local editor and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
