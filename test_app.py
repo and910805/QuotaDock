@@ -1,7 +1,10 @@
 from pathlib import Path
 
+from PySide6.QtCore import QPoint, QRect, QSize
+
 import app as app_module
 from app import (
+    clamped_position,
     ClaudeCliLocator,
     ClaudeUsageSnapshot,
     UsageSnapshot,
@@ -243,3 +246,29 @@ def test_claude_usage_response_parsing() -> None:
     assert value.five_hour.remaining_percent == 66
     assert value.seven_day is not None
     assert value.seven_day.remaining_percent == 39
+
+
+def test_saved_position_from_a_detached_monitor_is_pulled_back_on_screen() -> None:
+    """拔掉第二螢幕後，舊座標整個在畫面外，必須夾回可見範圍。"""
+    area = QRect(0, 0, 1440, 852)
+    panel = QSize(400, 678)
+    assert clamped_position(QPoint(1938, -82), panel, area) == QPoint(1040, 0)
+
+
+def test_position_already_on_screen_is_left_alone() -> None:
+    area = QRect(0, 0, 1440, 852)
+    panel = QSize(400, 678)
+    assert clamped_position(QPoint(300, 120), panel, area) == QPoint(300, 120)
+
+
+def test_secondary_screen_offset_area_is_respected() -> None:
+    """副螢幕的可見範圍不是從 0 開始，夾的時候要跟著位移。"""
+    area = QRect(1440, -180, 1920, 1080)
+    panel = QSize(400, 678)
+    assert clamped_position(QPoint(0, 0), panel, area) == QPoint(1440, 0)
+    assert clamped_position(QPoint(9999, 9999), panel, area) == QPoint(2960, 222)
+
+
+def test_window_larger_than_the_screen_still_lands_at_the_origin() -> None:
+    area = QRect(0, 0, 320, 240)
+    assert clamped_position(QPoint(500, 500), QSize(400, 678), area) == QPoint(0, 0)

@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, QPoint, QRectF, QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QPoint, QRect, QRectF, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QApplication,
@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
 
 
 APP_NAME = "QuotaDock"
-APP_VERSION = "1.2.3"
+APP_VERSION = "1.2.4"
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "CodexUsageWidget"
 STATE_PATH = APP_DIR / "usage_state.json"
 CLAUDE_STATE_PATH = APP_DIR / "claude_usage_state.json"
@@ -67,6 +67,21 @@ def ui_font(point_size: int, weight: QFont.Weight = QFont.Weight.Normal) -> QFon
     font.setWeight(weight)
     font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
     return font
+
+
+def clamped_position(point: QPoint, size: QSize, area: QRect) -> QPoint:
+    """把記住的座標夾回可見範圍。
+
+    拔掉螢幕或改解析度之後，上次存的座標可能整個落在畫面外，直接 move() 過去
+    視窗就等於消失了——使用者只會看到「點開就不見」。QRect.right() 是最後一個
+    像素而不是邊界外一格，所以上限要 +1。
+    """
+    max_x = max(area.left(), area.right() - size.width() + 1)
+    max_y = max(area.top(), area.bottom() - size.height() + 1)
+    return QPoint(
+        min(max(point.x(), area.left()), max_x),
+        min(max(point.y(), area.top()), max_y),
+    )
 
 
 def _version_key(name: str) -> tuple[int, ...]:
@@ -1736,6 +1751,8 @@ class UsageWidget(QWidget):
 
     def show_and_raise(self) -> None:
         self.mini.hide()
+        # 螢幕組態可能在執行中變了，每次要現身前都確認自己還在畫面內。
+        self.move(self._on_screen_position(self.pos()))
         self.show()
         self.raise_()
         self.activateWindow()
@@ -1779,10 +1796,18 @@ class UsageWidget(QWidget):
         self.settings.setValue("window_position", self.pos())
         super().mouseReleaseEvent(event)
 
+    def _on_screen_position(self, point: QPoint) -> QPoint:
+        screen = QApplication.screenAt(point) or QApplication.primaryScreen()
+        return clamped_position(point, self.size(), screen.availableGeometry())
+
     def _restore_position(self) -> None:
         saved = self.settings.value("window_position")
         if isinstance(saved, QPoint):
-            self.move(saved)
+            corrected = self._on_screen_position(saved)
+            self.move(corrected)
+            if corrected != saved:
+                # 順手把壞掉的座標寫回去，不然每次啟動都要再修一次。
+                self.settings.setValue("window_position", corrected)
             return
         screen = QApplication.primaryScreen().availableGeometry()
         self.move(screen.right() - self.width() - 24, screen.top() + 24)
