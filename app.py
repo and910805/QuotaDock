@@ -10,8 +10,11 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -39,7 +42,7 @@ from PySide6.QtWidgets import (
 
 
 APP_NAME = "QuotaDock"
-APP_VERSION = "1.2.4"
+APP_VERSION = "1.2.5"
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "CodexUsageWidget"
 STATE_PATH = APP_DIR / "usage_state.json"
 CLAUDE_STATE_PATH = APP_DIR / "claude_usage_state.json"
@@ -69,6 +72,67 @@ def ui_font(point_size: int, weight: QFont.Weight = QFont.Weight.Normal) -> QFon
     return font
 
 
+def is_newer_version(latest: str, current: str) -> bool:
+    """比版本號，容忍 tag 前面的 v。"""
+    return _version_key(latest.lstrip("vV")) > _version_key(current.lstrip("vV"))
+
+
+def parse_release(payload: dict[str, Any]) -> tuple[str, str] | None:
+    """從 GitHub release JSON 取出 (版本, 下載網址)。
+
+    草稿、預發行、或沒有 Windows 執行檔的 release 一律當作沒有新版；下載網址
+    也必須真的指向本專案的 release，免得回應被動過手腳就把使用者導去別的地方。
+    """
+    if payload.get("draft") or payload.get("prerelease"):
+        return None
+    tag = str(payload.get("tag_name") or "").strip()
+    if not tag:
+        return None
+    for asset in payload.get("assets") or []:
+        if str(asset.get("name") or "") != RELEASE_ASSET:
+            continue
+        url = str(asset.get("browser_download_url") or "")
+        if url.startswith(RELEASE_DOWNLOAD_PREFIX):
+            return tag.lstrip("vV"), url
+    return None
+
+
+class UpdateChecker:
+    """問 GitHub 有沒有新版，有的話把安裝檔抓下來。"""
+
+    def __init__(self, timeout_seconds: float = 10.0) -> None:
+        self.timeout_seconds = timeout_seconds
+
+    def _request(self, url: str) -> urllib.request.Request:
+        return urllib.request.Request(
+            url,
+            headers={
+                # GitHub API 不接受沒有 User-Agent 的請求。
+                "User-Agent": f"{APP_NAME}/{APP_VERSION}",
+                "Accept": "application/vnd.github+json",
+            },
+        )
+
+    def latest(self) -> tuple[str, str] | None:
+        with urllib.request.urlopen(self._request(RELEASE_API), timeout=self.timeout_seconds) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        if not isinstance(payload, dict):
+            return None
+        return parse_release(payload)
+
+    def download(self, url: str, destination: Path) -> Path:
+        if not url.startswith(RELEASE_DOWNLOAD_PREFIX):
+            raise RuntimeError("下載網址不是本專案的 release，已中止。")
+        with urllib.request.urlopen(self._request(url), timeout=180) as response:
+            with destination.open("wb") as handle:
+                shutil.copyfileobj(response, handle)
+        # 半途斷線會留下一個能執行但壞掉的檔案，寧可擋下來。
+        if destination.stat().st_size < 5_000_000:
+            destination.unlink(missing_ok=True)
+            raise RuntimeError("下載的檔案不完整，請稍後再試。")
+        return destination
+
+
 def clamped_position(point: QPoint, size: QSize, area: QRect) -> QPoint:
     """把記住的座標夾回可見範圍。
 
@@ -82,6 +146,15 @@ def clamped_position(point: QPoint, size: QSize, area: QRect) -> QPoint:
         min(max(point.x(), area.left()), max_x),
         min(max(point.y(), area.top()), max_y),
     )
+
+
+GITHUB_REPO = "and910805/QuotaDock"
+RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+RELEASE_DOWNLOAD_PREFIX = f"https://github.com/{GITHUB_REPO}/releases/download/"
+RELEASE_ASSET = "QuotaDock-Windows-x64.exe"
+UPDATE_CHECK_SETTING = "check_updates"
+# 檢查一次就夠了，這不是需要盯著的東西；開著好幾天的話一天再問一次。
+UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
 
 
 def _version_key(name: str) -> tuple[int, ...]:
@@ -572,7 +645,7 @@ class ClaudeCliLocator:
                 if state:
                     # 記起來：下次直接命中，之後的抖動就不會再退回「未安裝」。
                     settings.setValue(CLAUDE_CLI_SETTING, str(candidate))
-                    return candidate
+                    return candidate, False
                 inconclusive = inconclusive or state is None
 
         # 已知路徑全部落空，才去掃描；掃到的結果記起來，下次不用再掃。
@@ -772,6 +845,9 @@ class FetchSignals(QObject):
     succeeded = Signal(object)
     failed = Signal(str)
     login_finished = Signal(str)
+    update_available = Signal(str, str)
+    update_ready = Signal(str)
+    update_failed = Signal(str)
 
 
 class UsageRing(QWidget):
@@ -1065,6 +1141,13 @@ class SettingsDialog(QDialog):
         self.autostart.setChecked(_setting_bool(settings, "autostart", True))
         layout.addWidget(self.autostart)
 
+        self.check_updates = QCheckBox("檢查 QuotaDock 新版本（會連線 GitHub）")
+        self.check_updates.setToolTip(
+            "每天向 GitHub 查一次 release 清單。除了版本號之外不會送出任何資料。"
+        )
+        self.check_updates.setChecked(_setting_bool(settings, UPDATE_CHECK_SETTING, True))
+        layout.addWidget(self.check_updates)
+
         actions = QHBoxLayout()
         actions.addStretch()
         cancel = QPushButton("取消")
@@ -1085,6 +1168,7 @@ class SettingsDialog(QDialog):
         self.settings.setValue("bubble_duration", self.bubble_duration.currentData())
         self.settings.setValue("mini_source", self.mini_source.currentData())
         self.settings.setValue("autostart", self.autostart.isChecked())
+        self.settings.setValue(UPDATE_CHECK_SETTING, self.check_updates.isChecked())
         configure_autostart(self.autostart.isChecked())
         self.settings.sync()
         self.settings_changed.emit()
@@ -1099,7 +1183,14 @@ class UsageWidget(QWidget):
         self.signals.succeeded.connect(self._on_fetch_success)
         self.signals.failed.connect(self._on_fetch_failure)
         self.signals.login_finished.connect(self._on_claude_login_finished)
+        self.signals.update_available.connect(self._on_update_available)
+        self.signals.update_ready.connect(self._on_update_ready)
+        self.signals.update_failed.connect(self._on_update_failed)
         self._fetching = False
+        self._update_checking = False
+        self._update_downloading = False
+        self._update_url = ""
+        self._update_version = ""
         self._claude_logging_in = False
         self._claude_action = "login"
         self._drag_offset: QPoint | None = None
@@ -1142,6 +1233,11 @@ class UsageWidget(QWidget):
             )
         else:
             QTimer.singleShot(100, self.refresh)
+            # 用量先抓，更新檢查慢一步，開機時不要跟它搶頻寬。
+            QTimer.singleShot(5_000, self.check_for_update)
+            self.update_timer = QTimer(self)
+            self.update_timer.timeout.connect(self.check_for_update)
+            self.update_timer.start(UPDATE_CHECK_INTERVAL_MS)
 
         if screenshot_path:
             QTimer.singleShot(9000 if not demo else 900, self._save_screenshot_and_quit)
@@ -1260,6 +1356,14 @@ class UsageWidget(QWidget):
         root.addWidget(self.claude_card)
 
         root.addStretch()
+
+        self.update_button = QPushButton()
+        self.update_button.setObjectName("updateButton")
+        self.update_button.setAccessibleName("下載並安裝新版 QuotaDock")
+        self.update_button.clicked.connect(self._on_update_clicked)
+        self.update_button.hide()
+        root.addWidget(self.update_button)
+
         controls = QHBoxLayout()
         controls.setSpacing(10)
         self.refresh_button = QPushButton("立即更新")
@@ -1358,6 +1462,72 @@ class UsageWidget(QWidget):
     def _show_error(self, message: str) -> None:
         self.error_label.setText(message)
         self.error_label.show()
+
+    def check_for_update(self) -> None:
+        """背景問一次 GitHub 有沒有新版；失敗就安靜收工，這不值得打擾使用者。"""
+        if self._demo or self._update_checking or self._update_url:
+            return
+        if not getattr(sys, "frozen", False):
+            # 從原始碼跑的時候換掉 exe 沒有意義。
+            return
+        if not _setting_bool(self.settings, UPDATE_CHECK_SETTING, True):
+            return
+
+        self._update_checking = True
+
+        def task() -> None:
+            try:
+                found = UpdateChecker().latest()
+            except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
+                found = None
+            if found and is_newer_version(found[0], APP_VERSION):
+                self.signals.update_available.emit(found[0], found[1])
+            else:
+                self.signals.update_available.emit("", "")
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _on_update_available(self, version: str, url: str) -> None:
+        self._update_checking = False
+        if not version:
+            return
+        self._update_url = url
+        self._update_version = version
+        self.update_button.setText(f"有新版 v{version} · 點此更新")
+        self.update_button.setEnabled(True)
+        self.update_button.show()
+
+    def _on_update_clicked(self) -> None:
+        if not self._update_url or self._update_downloading:
+            return
+        self._update_downloading = True
+        self.update_button.setEnabled(False)
+        self.update_button.setText("下載中…")
+        url = self._update_url
+        version = self._update_version
+
+        def task() -> None:
+            target = Path(tempfile.gettempdir()) / f"QuotaDock-{version}.exe"
+            try:
+                UpdateChecker().download(url, target)
+            except Exception as exc:
+                self.signals.update_failed.emit(str(exc))
+                return
+            self.signals.update_ready.emit(str(target))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _on_update_ready(self, installer: str) -> None:
+        self._update_downloading = False
+        self.update_button.setText("安裝中…請稍候")
+        # 下載回來的就是完整安裝檔：它會關掉舊的、覆蓋安裝、再自己啟動。
+        subprocess.Popen([installer], close_fds=True, creationflags=CREATE_NO_WINDOW)
+
+    def _on_update_failed(self, message: str) -> None:
+        self._update_downloading = False
+        self.update_button.setEnabled(True)
+        self.update_button.setText(f"更新失敗，點此重試 (v{self._update_version})")
+        self._show_error(f"下載新版失敗：{message}")
 
     def _on_claude_button_clicked(self) -> None:
         if self._claude_action == "locate":
@@ -2076,6 +2246,10 @@ QPushButton:disabled { background: #26344A; color: #94A3B8; }
 #claudeLoginButton:disabled { background: #342D25; color: #B8AA96; }
 #secondaryButton { background: #182438; color: #E2E8F0; border: 1px solid #334155; }
 #secondaryButton:hover { background: #223047; }
+#updateButton { min-height: 32px; margin-bottom: 8px; border-radius: 10px; background: #1E3A8A; color: #DBEAFE; border: 1px solid #3B5BC0; font-size: 12px; font-weight: 700; padding: 0 12px; }
+#updateButton:hover { background: #274BA8; color: #FFFFFF; }
+#updateButton:pressed { background: #172E6E; }
+#updateButton:disabled { background: #1B2436; color: #94A3B8; border-color: #26344A; }
 #textButton { min-width: 62px; min-height: 30px; padding: 0 9px; background: transparent; color: #94A3B8; font-size: 12px; border: 1px solid #26344A; border-radius: 9px; }
 #textButton:checked { color: #35E28A; border-color: #2E8B61; background: #10271E; }
 #windowButton { min-width: 32px; max-width: 32px; min-height: 30px; padding: 0; background: transparent; color: #94A3B8; font-size: 18px; }

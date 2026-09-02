@@ -1,10 +1,14 @@
 from pathlib import Path
 
+import pytest
 from PySide6.QtCore import QPoint, QRect, QSize
 
 import app as app_module
 from app import (
+    RELEASE_ASSET,
     clamped_position,
+    is_newer_version,
+    parse_release,
     ClaudeCliLocator,
     ClaudeUsageSnapshot,
     UsageSnapshot,
@@ -15,6 +19,27 @@ from app import (
     mini_remaining,
     reset_time_label,
 )
+
+
+class FakeSettings:
+    """locate_detailed() 找到執行檔時會寫回設定；測試絕不能碰到真的登錄檔。"""
+
+    store: dict[str, object] = {}
+
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    def value(self, key: str, default: object = "") -> object:
+        return FakeSettings.store.get(key, default)
+
+    def setValue(self, key: str, value: object) -> None:
+        FakeSettings.store[key] = value
+
+
+@pytest.fixture(autouse=True)
+def _never_touch_real_settings(monkeypatch):
+    FakeSettings.store = {}
+    monkeypatch.setattr(app_module, "QSettings", FakeSettings)
 
 
 def snapshot(used: float, resets_at: int) -> UsageSnapshot:
@@ -179,12 +204,20 @@ def test_manual_override_wins_over_search(tmp_path: Path, monkeypatch) -> None:
     assert ClaudeCliLocator.locate() == manual
 
 
-def isolate_lookup(monkeypatch) -> None:
-    """把查找隔離在測試裡：不讀本機設定、不掃真實磁碟。"""
+def isolate_lookup(monkeypatch, tmp_path: Path) -> None:
+    """把查找完全隔離：不讀本機設定，也不讓任何真實安裝路徑被搜到。
+
+    候選清單裡有 ~/.local、%LOCALAPPDATA%、%APPDATA% 這些寫死的位置，所以家目錄
+    和環境變數都要指到空的暫存目錄——否則測試會隨這台機器有沒有裝 CLI 而變。
+    """
     monkeypatch.setattr(app_module, "_setting_str", lambda settings, key: "")
     monkeypatch.setattr(app_module.shutil, "which", lambda command: None)
+    monkeypatch.setattr(ClaudeCliLocator, "_packaged_managed", staticmethod(lambda root: []))
     monkeypatch.setattr(ClaudeCliLocator, "_desktop_managed", staticmethod(lambda root: []))
     monkeypatch.setattr(ClaudeCliLocator, "_scan", staticmethod(lambda roots: None))
+    monkeypatch.setattr(app_module.Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("APPDATA", str(tmp_path))
 
 
 def test_packaged_desktop_cli_is_found_in_localcache(tmp_path: Path) -> None:
@@ -213,7 +246,7 @@ def test_msix_projection_is_told_apart_from_the_real_file() -> None:
 
 def test_unreadable_candidate_is_reported_as_inconclusive(tmp_path: Path, monkeypatch) -> None:
     """防毒或檔案鎖讓 stat 失敗時要說「問不出來」，不能報成未安裝。"""
-    isolate_lookup(monkeypatch)
+    isolate_lookup(monkeypatch, tmp_path)
     manual = make_exe(tmp_path / "locked" / "claude.exe")
     monkeypatch.setenv("CLAUDE_USAGE_CLI", str(manual))
     monkeypatch.setattr(
@@ -223,7 +256,7 @@ def test_unreadable_candidate_is_reported_as_inconclusive(tmp_path: Path, monkey
 
 
 def test_missing_candidate_is_still_reported_as_not_installed(tmp_path: Path, monkeypatch) -> None:
-    isolate_lookup(monkeypatch)
+    isolate_lookup(monkeypatch, tmp_path)
     monkeypatch.setenv("CLAUDE_USAGE_CLI", str(tmp_path / "nope" / "claude.exe"))
     assert ClaudeCliLocator.locate_detailed() == (None, False)
 
@@ -272,3 +305,74 @@ def test_secondary_screen_offset_area_is_respected() -> None:
 def test_window_larger_than_the_screen_still_lands_at_the_origin() -> None:
     area = QRect(0, 0, 320, 240)
     assert clamped_position(QPoint(500, 500), QSize(400, 678), area) == QPoint(0, 0)
+
+
+def test_fallback_search_still_returns_a_two_tuple(tmp_path: Path, monkeypatch) -> None:
+    """記住的路徑失效時會走搜尋分支，它一樣要回傳 (路徑, 是否不可靠)。
+
+    CLI 自動更新會刪掉舊版目錄，記住的路徑就此失效——這條分支曾經回傳裸的
+    Path，fetch() 解包時直接 TypeError，面板只會說「暫時無法讀取」。
+    """
+    isolate_lookup(monkeypatch, tmp_path)
+    monkeypatch.delenv("CLAUDE_USAGE_CLI", raising=False)
+    cli = make_exe(tmp_path / ".local" / "bin" / "claude.exe")
+
+    assert ClaudeCliLocator.locate_detailed() == (cli, False)
+    assert ClaudeCliLocator.locate() == cli
+
+
+def test_every_locate_branch_agrees_on_the_return_shape(tmp_path: Path, monkeypatch) -> None:
+    """不管走哪條路，locate_detailed() 都必須是 (Path | None, bool)。"""
+    isolate_lookup(monkeypatch, tmp_path)
+    monkeypatch.delenv("CLAUDE_USAGE_CLI", raising=False)
+    found, inconclusive = ClaudeCliLocator.locate_detailed()
+    assert found is None
+    assert isinstance(inconclusive, bool)
+
+
+def release_payload(tag: str = "v1.3.0", asset: str = RELEASE_ASSET, **extra) -> dict:
+    payload = {
+        "tag_name": tag,
+        "draft": False,
+        "prerelease": False,
+        "assets": [
+            {"name": "source.zip", "browser_download_url": "https://example.com/source.zip"},
+            {
+                "name": asset,
+                "browser_download_url": f"https://github.com/and910805/QuotaDock/releases/download/{tag}/{asset}",
+            },
+        ],
+    }
+    payload.update(extra)
+    return payload
+
+
+def test_version_comparison_handles_the_v_prefix_and_double_digits() -> None:
+    assert is_newer_version("v1.2.6", "1.2.5")
+    assert is_newer_version("1.2.10", "1.2.9")
+    assert is_newer_version("v1.3.0", "v1.2.99")
+    assert not is_newer_version("v1.2.5", "1.2.5")
+    assert not is_newer_version("1.2.4", "1.2.5")
+
+
+def test_release_parsing_picks_the_windows_asset() -> None:
+    found = parse_release(release_payload())
+    assert found is not None
+    version, url = found
+    assert version == "1.3.0"
+    assert url.startswith("https://github.com/and910805/QuotaDock/releases/download/")
+
+
+def test_drafts_prereleases_and_missing_assets_are_ignored() -> None:
+    assert parse_release(release_payload(draft=True)) is None
+    assert parse_release(release_payload(prerelease=True)) is None
+    assert parse_release(release_payload(asset="QuotaDock-Linux")) is None
+    assert parse_release(release_payload(tag="")) is None
+    assert parse_release({}) is None
+
+
+def test_download_url_from_another_host_is_refused() -> None:
+    """回應被動過手腳也不能把使用者導去別的地方下載執行檔。"""
+    hijacked = release_payload()
+    hijacked["assets"][1]["browser_download_url"] = "https://evil.example.com/QuotaDock-Windows-x64.exe"
+    assert parse_release(hijacked) is None
