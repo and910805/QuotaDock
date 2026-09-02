@@ -7,6 +7,8 @@ import app as app_module
 from app import (
     RELEASE_ASSET,
     clamped_position,
+    codex_ring_window,
+    codex_windows,
     is_newer_version,
     parse_release,
     ClaudeCliLocator,
@@ -376,3 +378,58 @@ def test_download_url_from_another_host_is_refused() -> None:
     hijacked = release_payload()
     hijacked["assets"][1]["browser_download_url"] = "https://evil.example.com/QuotaDock-Windows-x64.exe"
     assert parse_release(hijacked) is None
+
+
+def codex_snapshot(primary: UsageWindow | None, secondary: UsageWindow | None) -> UsageSnapshot:
+    return UsageSnapshot(
+        plan_type="plus",
+        limit_id="codex",
+        limit_name=None,
+        primary=primary,
+        secondary=secondary,
+        has_credits=False,
+        unlimited_credits=False,
+        credit_balance="0",
+        reset_credits=0,
+        reached_type=None,
+        fetched_at=1,
+    )
+
+
+def test_codex_windows_are_classified_by_duration_not_position() -> None:
+    """Codex 有時把 5 小時放 primary、有時放 secondary，不能靠位置判斷。"""
+    five = UsageWindow(29, 300, 2_000)
+    week = UsageWindow(28, 10080, 9_000)
+
+    assert codex_windows(codex_snapshot(five, week)) == (five, week)
+    assert codex_windows(codex_snapshot(week, five)) == (five, week)
+    assert codex_windows(codex_snapshot(week, None)) == (None, week)
+    assert codex_windows(codex_snapshot(five, None)) == (five, None)
+    assert codex_windows(None) == (None, None)
+
+
+def test_unknown_window_length_is_treated_as_the_long_cycle() -> None:
+    odd = UsageWindow(10, None, 2_000)
+    assert codex_windows(codex_snapshot(odd, None)) == (None, odd)
+
+
+def test_ring_window_follows_the_setting_and_falls_back() -> None:
+    five = UsageWindow(90, 300, 2_000)   # 剩 10%
+    week = UsageWindow(28, 10080, 9_000)  # 剩 72%
+    both = codex_snapshot(five, week)
+
+    assert codex_ring_window(both, "five_hour") is five
+    assert codex_ring_window(both, "seven_day") is week
+    assert codex_ring_window(both, "auto") is five  # 自動取剩餘較低的
+
+    only_week = codex_snapshot(week, None)
+    assert codex_ring_window(only_week, "five_hour") is week  # 沒有短週期就退回長的
+    assert codex_ring_window(codex_snapshot(None, None), "auto") is None
+    assert codex_ring_window(None, "auto") is None
+
+
+def test_mini_bubble_counts_the_codex_five_hour_window() -> None:
+    """「取最低」以前只看 primary，快用完的 5 小時額度會被漏掉。"""
+    codex = codex_snapshot(UsageWindow(95, 300, 2_000), UsageWindow(20, 10080, 9_000))
+    assert mini_remaining("codex", codex, None) == 5
+    assert mini_remaining("min", codex, None) == 5

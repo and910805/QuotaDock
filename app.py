@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
 
 
 APP_NAME = "QuotaDock"
-APP_VERSION = "1.2.5"
+APP_VERSION = "1.2.6"
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "CodexUsageWidget"
 STATE_PATH = APP_DIR / "usage_state.json"
 CLAUDE_STATE_PATH = APP_DIR / "claude_usage_state.json"
@@ -153,6 +153,10 @@ RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RELEASE_DOWNLOAD_PREFIX = f"https://github.com/{GITHUB_REPO}/releases/download/"
 RELEASE_ASSET = "QuotaDock-Windows-x64.exe"
 UPDATE_CHECK_SETTING = "check_updates"
+CODEX_RING_SETTING = "codex_ring"
+# Codex 把 5 小時與 7 天分別放在 primary/secondary，但哪個在前面會變，
+# 所以一律用視窗長度認人；一天以內算短週期。
+SHORT_WINDOW_MAX_MINUTES = 24 * 60
 # 檢查一次就夠了，這不是需要盯著的東西；開著好幾天的話一天再問一次。
 UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
 
@@ -311,6 +315,38 @@ def _parse_iso_timestamp(value: Any) -> int | None:
         return None
 
 
+def codex_windows(
+    snapshot: "UsageSnapshot | None",
+) -> tuple["UsageWindow | None", "UsageWindow | None"]:
+    """回傳 (短週期, 長週期)。Codex 兩個視窗的先後順序不固定，看 duration 分類。"""
+    short: UsageWindow | None = None
+    long_window: UsageWindow | None = None
+    if snapshot is None:
+        return None, None
+    for window in (snapshot.primary, snapshot.secondary):
+        if window is None:
+            continue
+        minutes = window.duration_minutes or 0
+        if minutes and minutes <= SHORT_WINDOW_MAX_MINUTES:
+            short = short or window
+        else:
+            long_window = long_window or window
+    return short, long_window
+
+
+def codex_ring_window(
+    snapshot: "UsageSnapshot | None", choice: str
+) -> "UsageWindow | None":
+    """主圓環要顯示哪個 Codex 視窗；選的那個沒資料就退回另一個。"""
+    short, long_window = codex_windows(snapshot)
+    if choice == "five_hour":
+        return short or long_window
+    if choice == "seven_day":
+        return long_window or short
+    available = [window for window in (short, long_window) if window is not None]
+    return min(available, key=lambda window: window.remaining_percent) if available else None
+
+
 def mini_remaining(
     source: str,
     codex: UsageSnapshot | None,
@@ -319,9 +355,11 @@ def mini_remaining(
     """懸浮圖示要顯示的剩餘百分比；指定來源沒資料時退回看得到的那邊。"""
 
     def codex_values() -> list[float]:
-        if codex and codex.primary:
-            return [codex.primary.remaining_percent]
-        return []
+        return [
+            window.remaining_percent
+            for window in codex_windows(codex)
+            if window is not None
+        ]
 
     def claude_values() -> list[float]:
         if claude is None:
@@ -1137,6 +1175,18 @@ class SettingsDialog(QDialog):
         self.mini_source.setCurrentIndex(max(0, self.mini_source.findData(source_value)))
         layout.addWidget(self.mini_source)
 
+        layout.addWidget(QLabel("主圓環顯示的 Codex 額度"))
+        self.codex_ring = QComboBox()
+        for label, value in [
+            ("自動（剩餘較低者）", "auto"),
+            ("5 小時額度", "five_hour"),
+            ("7 天額度", "seven_day"),
+        ]:
+            self.codex_ring.addItem(label, value)
+        ring_value = str(settings.value(CODEX_RING_SETTING, "auto"))
+        self.codex_ring.setCurrentIndex(max(0, self.codex_ring.findData(ring_value)))
+        layout.addWidget(self.codex_ring)
+
         self.autostart = QCheckBox("登入 Windows 時自動啟動")
         self.autostart.setChecked(_setting_bool(settings, "autostart", True))
         layout.addWidget(self.autostart)
@@ -1167,6 +1217,7 @@ class SettingsDialog(QDialog):
         self.settings.setValue("notify_low", self.notify_low.isChecked())
         self.settings.setValue("bubble_duration", self.bubble_duration.currentData())
         self.settings.setValue("mini_source", self.mini_source.currentData())
+        self.settings.setValue(CODEX_RING_SETTING, self.codex_ring.currentData())
         self.settings.setValue("autostart", self.autostart.isChecked())
         self.settings.setValue(UPDATE_CHECK_SETTING, self.check_updates.isChecked())
         configure_autostart(self.autostart.isChecked())
@@ -1301,12 +1352,29 @@ class UsageWidget(QWidget):
         cycle_layout = QVBoxLayout(self.cycle_card)
         cycle_layout.setContentsMargins(16, 12, 16, 12)
         cycle_layout.setSpacing(4)
+        (
+            self.codex_five_section,
+            self.codex_five_value,
+            self.codex_five_bar,
+            self.codex_five_reset,
+        ) = self._create_quota_section("5 小時額度", bar_object="codexProgress")
+        (
+            self.codex_week_section,
+            self.codex_week_value,
+            self.codex_week_bar,
+            self.codex_week_reset,
+        ) = self._create_quota_section("7 天額度", bar_object="codexProgress")
+        cycle_layout.addWidget(self.codex_five_section)
+        cycle_layout.addWidget(self.codex_week_section)
+        # 兩個視窗都沒有時才退回這行文字，不然卡片會整個空著。
         self.cycle_label = QLabel("額度週期")
         self.cycle_label.setObjectName("cardTitle")
         self.reset_label = QLabel("等待 Codex 回傳重置時間")
         self.reset_label.setObjectName("cardValue")
         cycle_layout.addWidget(self.cycle_label)
         cycle_layout.addWidget(self.reset_label)
+        self.codex_five_section.hide()
+        self.codex_week_section.hide()
         root.addWidget(self.cycle_card)
 
         self.claude_card = QFrame()
@@ -1384,7 +1452,7 @@ class UsageWidget(QWidget):
         root.addWidget(self.error_label)
 
     def _create_quota_section(
-        self, title: str
+        self, title: str, bar_object: str = "claudeProgress"
     ) -> tuple[QFrame, QLabel, QProgressBar, QLabel]:
         section = QFrame()
         section.setObjectName("quotaSection")
@@ -1401,7 +1469,7 @@ class UsageWidget(QWidget):
         header.addWidget(value)
         layout.addLayout(header)
         bar = QProgressBar()
-        bar.setObjectName("claudeProgress")
+        bar.setObjectName(bar_object)
         bar.setRange(0, 100)
         bar.setTextVisible(False)
         bar.setFixedHeight(7)
@@ -1624,6 +1692,15 @@ class UsageWidget(QWidget):
             self._handle_claude_notifications(previous_claude, claude)
         self.tray.setToolTip(self._tray_tooltip())
 
+    def _codex_ring_choice(self) -> str:
+        return _setting_str(self.settings, CODEX_RING_SETTING) or "auto"
+
+    def _reapply_view(self) -> None:
+        """設定存檔後立刻套用，不用等下一次自動更新。"""
+        if self._snapshot is not None:
+            self._render_codex(self._snapshot)
+        self._update_mini_usage()
+
     def _update_mini_usage(self) -> None:
         source = _setting_str(self.settings, "mini_source") or "min"
         self.mini.set_remaining(
@@ -1635,15 +1712,43 @@ class UsageWidget(QWidget):
         self.plan_badge.setText(plan_label)
         self.sync_label.setText(datetime.fromtimestamp(snapshot.fetched_at).strftime("%H:%M 已更新"))
 
-        primary = snapshot.primary
-        if primary is not None:
-            self.ring.set_remaining(primary.remaining_percent)
-            self.used_label.setText(f"已使用 {percent_text(primary.used_percent)}")
-            self.cycle_label.setText(duration_label(primary.duration_minutes))
-            self.reset_label.setText(reset_time_label(primary.resets_at))
+        short, long_window = codex_windows(snapshot)
+        ring_window = codex_ring_window(snapshot, self._codex_ring_choice())
+        if ring_window is not None:
+            self.ring.set_remaining(ring_window.remaining_percent)
+            self.used_label.setText(
+                f"{duration_label(ring_window.duration_minutes)} · 已使用 "
+                f"{percent_text(ring_window.used_percent)}"
+            )
         else:
             self.ring.set_remaining(0)
             self.used_label.setText("目前沒有可顯示的額度")
+
+        for window, section, value, bar, reset in (
+            (
+                short,
+                self.codex_five_section,
+                self.codex_five_value,
+                self.codex_five_bar,
+                self.codex_five_reset,
+            ),
+            (
+                long_window,
+                self.codex_week_section,
+                self.codex_week_value,
+                self.codex_week_bar,
+                self.codex_week_reset,
+            ),
+        ):
+            if window is None:
+                section.hide()
+            else:
+                self._set_quota_section(section, value, bar, reset, window)
+
+        nothing_to_show = short is None and long_window is None
+        self.cycle_label.setVisible(nothing_to_show)
+        self.reset_label.setVisible(nothing_to_show)
+        if nothing_to_show:
             self.cycle_label.setText("額度週期")
             self.reset_label.setText("Codex 未提供此資料")
 
@@ -1866,8 +1971,12 @@ class UsageWidget(QWidget):
         return " · ".join(parts) if parts else APP_NAME
 
     def _update_time_labels(self) -> None:
-        if self._snapshot and self._snapshot.primary:
-            self.reset_label.setText(reset_time_label(self._snapshot.primary.resets_at))
+        if self._snapshot:
+            short, long_window = codex_windows(self._snapshot)
+            if short is not None:
+                self.codex_five_reset.setText(reset_time_label(short.resets_at))
+            if long_window is not None:
+                self.codex_week_reset.setText(reset_time_label(long_window.resets_at))
         if self._claude_snapshot and self._claude_snapshot.five_hour:
             self.claude_five_reset.setText(
                 reset_time_label(self._claude_snapshot.five_hour.resets_at)
@@ -1887,6 +1996,7 @@ class UsageWidget(QWidget):
             self.expand_from_mini()
         dialog = SettingsDialog(self.settings, self)
         dialog.settings_changed.connect(self._apply_timer_setting)
+        dialog.settings_changed.connect(self._reapply_view)
         dialog.exec()
 
     def _apply_pin_label(self, checked: bool) -> None:
@@ -2232,6 +2342,8 @@ QWidget { color: #F8FAFC; font-family: __FONTS__; font-size: 14px; }
 #quotaName { color: #D9D1C5; font-size: 12px; font-weight: 600; }
 #quotaValue { color: #FFF8ED; font-size: 13px; font-weight: 700; }
 #quotaReset { color: #9E9283; font-size: 11px; }
+#codexProgress { border: 0; border-radius: 3px; background: #1B2A3F; }
+#codexProgress::chunk { border-radius: 3px; background: #35E28A; }
 #claudeProgress { border: 0; border-radius: 3px; background: #342D25; }
 #claudeProgress::chunk { border-radius: 3px; background: #D8A96A; }
 #errorLabel { color: #FCA5A5; background: #2A151A; border: 1px solid #7F1D1D; border-radius: 10px; padding: 8px; margin-top: 8px; }
