@@ -1,37 +1,10 @@
-$ErrorActionPreference = 'Stop'
-
+﻿$ErrorActionPreference = 'Stop'
 $project = Split-Path -Parent $MyInvocation.MyCommand.Path
 $source = Join-Path $project 'release\QuotaDock.exe'
 if (-not (Test-Path -LiteralPath $source)) {
-    throw 'Run build_release.ps1 first.'
+    throw '請先執行 build_release.ps1 產生執行檔。'
 }
-
-$installDir = Join-Path $env:LOCALAPPDATA 'Programs\QuotaDock'
-$target = Join-Path $installDir 'QuotaDock.exe'
-New-Item -ItemType Directory -Path $installDir -Force | Out-Null
-if (Test-Path -LiteralPath $target) {
-    $resolvedTarget = [System.IO.Path]::GetFullPath($target)
-    Get-CimInstance Win32_Process |
-        Where-Object { $_.ExecutablePath -eq $resolvedTarget } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
-    Start-Sleep -Milliseconds 500
-}
-Copy-Item -LiteralPath $source -Destination $target -Force
-
-$desktop = [Environment]::GetFolderPath('Desktop')
-$shortcutName = 'QuotaDock.lnk'
-$shortcutPath = Join-Path $desktop $shortcutName
-$shell = New-Object -ComObject WScript.Shell
-$shortcut = $shell.CreateShortcut($shortcutPath)
-$shortcut.TargetPath = $target
-$shortcut.WorkingDirectory = $installDir
-$shortcut.Description = 'View Codex and Claude Code subscription usage and reset times'
-$shortcut.IconLocation = "$target,0"
-$shortcut.Save()
-
-$runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-Set-ItemProperty -Path $runKey -Name 'QuotaDock' -Value ('"' + $target + '"')
-Remove-ItemProperty -Path $runKey -Name 'CodexUsageWidget' -ErrorAction SilentlyContinue
-
-Start-Process -FilePath $target
-Write-Output $shortcutPath
+# 由執行檔共用安裝流程，保留使用者的自動啟動偏好。
+$installer = Start-Process -FilePath $source -ArgumentList '--install' -WindowStyle Hidden -Wait -PassThru
+if ($installer.ExitCode -ne 0) { throw '安裝失敗，請查看執行檔顯示的錯誤。' }
+Write-Output '安裝程序已結束；一般使用也可直接執行免安裝檔。'

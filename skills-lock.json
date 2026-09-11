@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "skills": {
+    "agent-friendly-design": {
+      "source": "aa-on-ai/agentic-design-system",
+      "sourceType": "github",
+      "skillPath": "skills/agent-friendly-design/SKILL.md",
+      "computedHash": "5876e3d3d213734e482c39ef00000e4cee2fe190a60056c27321f5aeef7e2867"
+    },
+    "agentic-design-system": {
+      "source": "aa-on-ai/agentic-design-system",
+      "sourceType": "github",
+      "skillPath": "skills/agentic-design-system/SKILL.md",
+      "computedHash": "b7e5fd73309e38f46873994ba5d70d56f205aca207e21dfcd55ee655276b80f3"
+    },
+    "design-review": {
+      "source": "aa-on-ai/agentic-design-system",
+      "sourceType": "github",
+      "skillPath": "skills/design-review/SKILL.md",
+      "computedHash": "25d514aa7dd4c2913d7946ab7ae7da198f4c576101480295896f845df6600cae"
+    },
+    "design-variations": {
+      "source": "aa-on-ai/agentic-design-system",
+      "sourceType": "github",
+      "skillPath": "skills/design-variations/SKILL.md",
+      "computedHash": "9a0c1a6a3dcf2ca6fe2f02ecc76c18b53fdf071d28216a7a4b4fff5f99df6599"
+    },
+    "ui-polish-pass": {
+      "source": "aa-on-ai/agentic-design-system",
+      "sourceType": "github",
+      "skillPath": "skills/ui-polish-pass/SKILL.md",
+      "computedHash": "7ff546b38f170933a69c1db81ba94fda959d73e84fdb76c75895d625edee3628"
+    },
+    "ux-baseline-check": {
+      "source": "aa-on-ai/agentic-design-system",
+      "sourceType": "github",
+      "skillPath": "skills/ux-baseline-check/SKILL.md",
+      "computedHash": "1bc927598ce61bd46554d218939805b86fbc884dae5d0f373b9e66be45c20e95"
+    },
+    "visual-reference-calibration": {
+      "source": "aa-on-ai/agentic-design-system",
+      "sourceType": "github",
+      "skillPath": "skills/visual-reference-calibration/SKILL.md",
+      "computedHash": "7cbbd85437fa29ff945a62279765d936b35b78ecd2633d6367e0738519dbc607"
+    },
+    "web-animation-design": {
+      "source": "aa-on-ai/agentic-design-system",
+      "sourceType": "github",
+      "skillPath": "skills/web-animation-design/SKILL.md",
+      "computedHash": "721d89aaf0296d8c8587f7acd4b8bcb7c3a7813a297dbc6315e20510224198c0"
+    },
+    "whimsical-design": {
+      "source": "aa-on-ai/agentic-design-system",
+      "sourceType": "github",
+      "skillPath": "skills/whimsical-design/SKILL.md",
+      "computedHash": "8109689499af298bf39c34a2af9732bfb97321448107aa2ebbf4fd8cbc530ff8"
+    },
+    "world-build": {
+      "source": "aa-on-ai/agentic-design-system",
+      "sourceType": "github",
+      "skillPath": "skills/world-build/SKILL.md",
+      "computedHash": "9baaa3fe7b1434cfec43ed736e8c60754a0d2037923473fcaa5c4bfd485d9ea2"
+    }
+  }
+}

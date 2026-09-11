@@ -20,3 +20,8 @@ dual-packaged.png
 .vscode/
 .DS_Store
 Thumbs.db
+
+# 專案內安裝的第三方設計 Skill 與本機驗證輸出
+.agents/
+evidence/
+test-data/

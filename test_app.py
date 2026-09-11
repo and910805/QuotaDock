@@ -164,7 +164,7 @@ def test_mini_source_falls_back_when_provider_has_no_data() -> None:
     assert mini_remaining("claude", codex, empty_claude) == 40
     assert mini_remaining("claude", codex, None) == 40
     assert mini_remaining("codex", None, claude_snapshot(20, 50)) == 50
-    assert mini_remaining("min", None, None) == 0.0
+    assert mini_remaining("min", None, None) is None
 
 
 def make_exe(path: Path) -> Path:
@@ -341,7 +341,7 @@ def release_payload(tag: str = "v1.3.0", asset: str = RELEASE_ASSET, **extra) ->
             {"name": "source.zip", "browser_download_url": "https://example.com/source.zip"},
             {
                 "name": asset,
-                "browser_download_url": f"https://github.com/and910805/QuotaDock/releases/download/{tag}/{asset}",
+                "browser_download_url": f"https://github.com/Andy61490963/Quota-PromptDock/releases/download/{tag}/{asset}",
             },
         ],
     }
@@ -362,7 +362,7 @@ def test_release_parsing_picks_the_windows_asset() -> None:
     assert found is not None
     version, url = found
     assert version == "1.3.0"
-    assert url.startswith("https://github.com/and910805/QuotaDock/releases/download/")
+    assert url.startswith("https://github.com/Andy61490963/Quota-PromptDock/releases/download/")
 
 
 def test_drafts_prereleases_and_missing_assets_are_ignored() -> None:
