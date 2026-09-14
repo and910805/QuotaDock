@@ -180,7 +180,8 @@ class TokenUsageStore:
         db.execute("INSERT OR REPLACE INTO contexts VALUES (?,?,?,?,?)",
                    (thread, turn, model, effort, int(ambiguous)))
 
-    def response(self, db, payload: dict, stamp, state: dict):
+    def response(self, db, payload: dict, stamp, state: dict, copies_expected=False,
+                 snapshots=False):
         response_id = _text(payload.get("response_id"))
         if not response_id:
             raise ValueError("missing response identity")
@@ -192,8 +193,21 @@ class TokenUsageStore:
         timestamp = _timestamp(stamp)
         old = db.execute("SELECT * FROM responses WHERE response_id=?", (response_id,)).fetchone()
         if old:
-            if tuple(old[k] for k in COUNTERS) != values or old["thread_id"] != thread or old["turn_id"] != turn:
-                db.execute("UPDATE responses SET conflict=1 WHERE response_id=?", (response_id,))
+            # Claude resume/fork copies whole records into a new session file, so a
+            # duplicate that only changed its surrounding thread is not a conflict.
+            same_identity = old["turn_id"] == turn and (copies_expected or old["thread_id"] == thread)
+            if same_identity and tuple(old[k] for k in COUNTERS) == values:
+                return
+            if same_identity and snapshots:
+                # Streamed transcripts repeat a response while it grows; the
+                # snapshot with the largest total is the final one, regardless
+                # of the order the copies are read in.
+                if values[-1] > old["total_tokens"]:
+                    db.execute("""UPDATE responses SET input_tokens=?, cached_input_tokens=?,
+                        cache_write_input_tokens=?, output_tokens=?, reasoning_output_tokens=?,
+                        total_tokens=? WHERE response_id=?""", (*values, response_id))
+                return
+            db.execute("UPDATE responses SET conflict=1 WHERE response_id=?", (response_id,))
             return
         db.execute("INSERT INTO responses VALUES (?,?,?,?,?,?,?,?,?,?,0)",
                    (response_id, thread, turn, timestamp, *values))
@@ -256,16 +270,22 @@ class ScanProgress:
 
 
 class TokenUsageCollector:
+    FOLDERS = ("sessions", "archived_sessions")
+
     def __init__(self, store: TokenUsageStore, root: Path | None = None):
         self.store = store
-        self.root = Path(root) if root is not None else codex_home()
+        self.root = Path(root) if root is not None else self.default_root()
+
+    @staticmethod
+    def default_root() -> Path:
+        return codex_home()
 
     def scan(self, discover=True, stop: threading.Event | None = None) -> Iterator[ScanProgress]:
         stop = stop or threading.Event()
         with self.store.connection() as db:
             paths = {Path(row[0]) for row in db.execute("SELECT path FROM sources")}
             if discover:
-                for name in ("sessions", "archived_sessions"):
+                for name in self.FOLDERS:
                     folder = self.root / name
                     if folder.exists():
                         # Walk errors must be reported, not mistaken for an empty history.

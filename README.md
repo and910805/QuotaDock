@@ -1,8 +1,8 @@
 # Quota PromptDock
 
-Windows 桌面上的 AI 額度與常用指令小工具。查看 Codex／Claude Code 剩餘額度、依模型與推理強度追蹤 Codex 本機 Token 用量，並將常用指令一鍵貼到目前使用的 AI 工具。
+Windows 桌面上的 AI 額度與常用指令小工具。查看 Codex／Claude Code 剩餘額度、依模型與推理強度追蹤 Codex 與 Claude Code 的本機 Token 用量，並將常用指令一鍵貼到目前使用的 AI 工具。
 
-**目前正式版：v1.4.3** · Windows x64 · 繁體中文 · 不需安裝 Python
+**目前正式版：v1.5.0** · Windows x64 · 繁體中文 · 不需安裝 Python
 
 [下載最新版本](https://github.com/Andy61490963/Quota-PromptDock/releases/latest) · [v1.4.3 更新說明](https://github.com/Andy61490963/Quota-PromptDock/releases/tag/v1.4.3) · [驗證紀錄](驗證紀錄.md)
 
@@ -13,7 +13,7 @@ Windows 桌面上的 AI 額度與常用指令小工具。查看 Codex／Claude C
 | 功能 | 說明 |
 |---|---|
 | 額度資訊 | Codex／Claude Code 的已用與剩餘百分比、進度條、重置時間 |
-| Codex Token 用量 | 依模型 × 推理強度彙總，支援日期篩選與各回合明細 |
+| Token 用量 | Codex 與 Claude Code 各一張卡，依模型 × 推理強度彙總，支援日期篩選與各回合明細 |
 | 常用指令 | 內建 11 個指令，可新增、編輯、排序及一鍵貼上 |
 | 數字動畫 | 統計數值改變時播放 Odometer 數字滾動動畫 |
 | 桌面操作 | 視窗置頂、系統匣、側邊懸浮圖示、額度提醒與開機啟動 |
@@ -37,7 +37,7 @@ Windows 桌面上的 AI 額度與常用指令小工具。查看 Codex／Claude C
 
 ## 額度與主畫面
 
-畫面順序為 **額度資訊 → Codex Token 用量 → 常用指令 → 底部操作**。
+畫面順序為 **額度資訊（含 Claude Token 用量）→ Codex Token 用量 → 常用指令 → 底部操作**。
 
 - **額度**顯示帳號已用／剩餘百分比，不等於累計 Token。主圓環可在設定選擇自動、5 小時或 7 天額度；重置時間使用台灣時間。
 - 額度在啟動、展開與按下「立即更新」時查詢；全新設定預設每 60 秒更新，可自行調整。查詢失敗會保留本次執行中最後成功的數值並標示狀態，沒有資料時顯示「尚無資料」。
@@ -45,9 +45,11 @@ Windows 桌面上的 AI 額度與常用指令小工具。查看 Codex／Claude C
 - 視窗會依內容與螢幕高度調整。正常版面保留圓環在上、額度卡片在下；空間不足時會縮小摘要或使用捲動區，常用指令與底部操作仍可使用。
 - 可拖曳頂部移動視窗；右上角「—」可收合為側邊懸浮圖示，系統匣選單可顯示或結束程式。
 
-## Codex Token 用量
+## Token 用量（Codex 與 Claude Code）
 
-這個區塊回答的是「哪些模型與推理強度用了多少 Token」，例如 Luna Low、Luna High、Sol High。清單來自實際紀錄，**沒有寫死模型或強度選項**；只要有可核對的本機紀錄，已使用過的舊模型或未來模型也能納入，不同版本分開統計。
+這個區塊回答的是「哪些模型與推理強度用了多少 Token」，例如 Luna Low、Sol High、Fable Xhigh。清單來自實際紀錄，**沒有寫死模型或強度選項**；只要有可核對的本機紀錄，已使用過的舊模型或未來模型也能納入，不同版本分開統計。
+
+Codex Token 卡位於主畫面中段；**Claude Token 卡在額度捲動區內、Claude Code 額度卡下方**，操作方式與 Codex 卡相同，日期區間各自記住。
 
 | 操作 | 顯示內容 |
 |---|---|
@@ -68,7 +70,8 @@ Windows 桌面上的 AI 額度與常用指令小工具。查看 Codex／Claude C
 
 ### 收錄方式與計算規則
 
-- 讀取 `CODEX_HOME` 指定的目錄；未設定時使用使用者的 `.codex`，涵蓋 `sessions` 與 `archived_sessions`。
+- Codex：讀取 `CODEX_HOME` 指定的目錄；未設定時使用使用者的 `.codex`，涵蓋 `sessions` 與 `archived_sessions`。
+- Claude Code：讀取 `CLAUDE_CONFIG_DIR` 指定的目錄；未設定時使用使用者的 `.claude`，涵蓋 `projects` 下所有工作區與子代理逐字稿。以訊息 ID 去重——同一則訊息拆成多行、resume／fork 複製到新檔，以及子代理逐字稿邊生成邊重複的快照（取總量最大者）都只計一次。快取讀取與快取寫入計入輸入 Token，思考（thinking）計入輸出 Token。
 - 首次在背景逐行、分批整理歷史。運行中每 10 秒讀取新增內容，每 60 秒尋找新檔案；「立即更新」也會觸發檢查。
 - 使用 `token_usage_record.usage` 的逐次回應用量，以 `response_id` 去重，並透過回合 UUID 對應當時記錄的模型與推理強度。一個回合有多次回應時會全部累計。
 - **快取輸入已包含在輸入 Token，推理已包含在輸出 Token**，不再次加進總量；也不將逐次用量與回合／對話累計相加。
@@ -77,7 +80,7 @@ Windows 桌面上的 AI 額度與常用指令小工具。查看 Codex／Claude C
 
 ### 統計範圍與缺漏
 
-這是 **「本機已記錄用量」**，不等於所有裝置或整個帳號的用量，不換算訂閱額度百分比或費用。目前不包含 Claude Token 統計及跨裝置同步。
+這是 **「本機已記錄用量」**，不等於所有裝置或整個帳號的用量，不換算訂閱額度百分比或費用。目前不包含跨裝置同步。
 
 - 只有舊版 `token_count` 累計事件的紀錄不回推、不納入逐次總量。
 - 缺少模型／強度、設定衝突或可辨識但無法歸屬的模型轉送，列為未知分類。未記錄的服務端轉送無法保證辨識。
@@ -143,7 +146,8 @@ v1.4.3 為會變動的統計數值加入約半秒的滾動動畫：
 |---|---|
 | 常用指令 | `%LOCALAPPDATA%\CodexUsageWidget\prompts.json` |
 | 上一次指令備份 | 同目錄的 `prompts.json.bak` |
-| Token 統計 | `%LOCALAPPDATA%\CodexUsageWidget\token_usage.sqlite3` |
+| Codex Token 統計 | `%LOCALAPPDATA%\CodexUsageWidget\token_usage.sqlite3` |
+| Claude Token 統計 | `%LOCALAPPDATA%\CodexUsageWidget\claude_token_usage.sqlite3` |
 | 額度快取 | `%LOCALAPPDATA%\CodexUsageWidget` 內的快取檔 |
 | 設定 | Windows 登錄檔 `HKEY_CURRENT_USER\Software\EricTools\CodexUsageWidget` |
 
@@ -195,7 +199,8 @@ Remove-Item Env:QT_QPA_PLATFORM
 |---|---|
 | `app.py` | 額度查詢、主視窗、設定、通知與版本更新 |
 | `token_usage.py` | Codex 紀錄讀取、SQLite 儲存及彙總查詢 |
-| `token_panel.py` | Token 背景服務、摘要與明細視窗 |
+| `claude_usage.py` | Claude Code 紀錄讀取與去重（沿用同一套儲存） |
+| `token_panel.py` | Token 背景服務、摘要與明細視窗（Codex 與 Claude 共用） |
 | `odometer.py` | 數字滾動、動畫狀態與表格數值呈現 |
 | `prompt_tools.py` | 常用指令保存、編輯與原生貼上 |
 

@@ -9,7 +9,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Qt, Signal, QPointF
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDialog,
-    QFrame, QHBoxLayout, QHeaderView, QLabel, QPushButton, QTableWidget,
+    QFrame, QHBoxLayout, QHeaderView, QLabel, QPushButton, QSizePolicy, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget, QStyledItemDelegate, QStyle, QMessageBox, QProgressBar)
 
 from token_usage import (PERIODS, TAIWAN_TZ, TokenUsageCollector, TokenUsageStore,
@@ -64,9 +64,12 @@ class TokenUsageService(QObject):
     turns_ready = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, path: Path, period="today", root=None, parent=None):
+    def __init__(self, path: Path, period="today", root=None, parent=None,
+                 collector_factory=TokenUsageCollector, thread_name="CodexTokenLedger"):
         super().__init__(parent)
         self.path, self.root = path, root
+        self.collector_factory = collector_factory
+        self.thread_name = thread_name
         self._period = period
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -78,7 +81,7 @@ class TokenUsageService(QObject):
 
     def start(self):
         if self._thread is None:
-            self._thread = threading.Thread(target=self._run, name="CodexTokenLedger", daemon=True)
+            self._thread = threading.Thread(target=self._run, name=self.thread_name, daemon=True)
             self._thread.start()
 
     def stop(self):
@@ -126,7 +129,7 @@ class TokenUsageService(QObject):
             try:
                 if store is None:
                     store = TokenUsageStore(self.path)
-                collector = TokenUsageCollector(store, self.root)
+                collector = self.collector_factory(store, self.root)
                 with self._lock:
                     refresh, self._refresh = self._refresh, False
                 self._publish(store)
@@ -164,6 +167,9 @@ class ElidedLabel(QLabel):
         self.full_text = ""
         self.setMinimumWidth(0)
         self.setTextFormat(Qt.TextFormat.PlainText)
+        # 寬度由版面分配，不讓字寬回頭驅動版面——在捲動區裡，
+        # 捲軸出現/消失改變寬度時才不會與重排互相遞迴。
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
     def set_full_text(self, text):
         self.full_text = text
@@ -172,7 +178,9 @@ class ElidedLabel(QLabel):
         self._elide()
 
     def _elide(self):
-        super().setText(self.fontMetrics().elidedText(self.full_text, Qt.TextElideMode.ElideRight, max(0, self.width())))
+        text = self.fontMetrics().elidedText(self.full_text, Qt.TextElideMode.ElideRight, max(0, self.width()))
+        if text != self.text():
+            super().setText(text)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -195,9 +203,13 @@ class TokenUsagePanel(QFrame):
     period_changed = Signal(str)
     layout_changed = Signal()
 
-    def __init__(self, settings, dialog_style: str, parent=None):
+    def __init__(self, settings, dialog_style: str, parent=None, *,
+                 title="Codex Token 用量", period_setting=TOKEN_PERIOD_SETTING, source_hint="Codex"):
         super().__init__(parent)
         self.settings, self.dialog_style = settings, dialog_style
+        self.title_text = title
+        self.period_setting = period_setting
+        self.source_hint = source_hint
         self.service = None
         self.report = None
         self.dialog = None
@@ -206,7 +218,7 @@ class TokenUsagePanel(QFrame):
         self._busy = None
         self._error = ""
         self.setObjectName("tokenCard")
-        self.setAccessibleName("Codex Token 用量")
+        self.setAccessibleName(title)
         self.setStyleSheet("""
             #tokenCard { background: #121F30; border: 1px solid #31485B; border-radius: 14px; }
             #tokenCard QLabel { border: 0; background: transparent; color: #CBD5E1; font-size: 12px; }
@@ -234,17 +246,17 @@ class TokenUsagePanel(QFrame):
         layout.setContentsMargins(12, 9, 12, 8)
         layout.setSpacing(4)
         header = QHBoxLayout()
-        title = QLabel("Codex Token 用量")
-        title.setObjectName("tokenTitle")
-        header.addWidget(title)
+        title_label = QLabel(title)
+        title_label.setObjectName("tokenTitle")
+        header.addWidget(title_label)
         header.addStretch()
         self.period = TokenPeriodCombo()
         self.period.setFixedSize(96, 30)
-        self.period.setAccessibleName("Token 統計日期區間")
+        self.period.setAccessibleName(f"{source_hint} Token 統計日期區間")
         self.period.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         for label, value in PERIODS:
             self.period.addItem(label, value)
-        self.period.setCurrentIndex(max(0, self.period.findData(settings.value(TOKEN_PERIOD_SETTING, "today"))))
+        self.period.setCurrentIndex(max(0, self.period.findData(settings.value(period_setting, "today"))))
         self.period.currentIndexChanged.connect(self._change_period)
         header.addWidget(self.period)
         layout.addLayout(header)
@@ -298,7 +310,7 @@ class TokenUsagePanel(QFrame):
         self.period_changed.connect(service.set_period)
 
     def _change_period(self):
-        self.settings.setValue(TOKEN_PERIOD_SETTING, self.period.currentData())
+        self.settings.setValue(self.period_setting, self.period.currentData())
         self.settings.sync()
         # Do not label a previous period's totals as the newly selected period.
         self.total.setText("讀取中…")
@@ -375,7 +387,7 @@ class TokenUsagePanel(QFrame):
         elif self.report:
             text += " · " + datetime.fromtimestamp(self.report.updated_at, TAIWAN_TZ).strftime("%H:%M 更新")
         self.status.setText(text)
-        detail = self._error or (coverage_text(self.report) if self.report else "等待讀取 Codex 本機紀錄。")
+        detail = self._error or (coverage_text(self.report) if self.report else f"等待讀取 {self.source_hint} 本機紀錄。")
         self.status.setToolTip(detail)
         self.status.setAccessibleDescription(detail)
 
@@ -409,7 +421,7 @@ class TokenDetailsDialog(QDialog):
         self._selected = None
         self._page = 0
         self._request_id = 0
-        self.setWindowTitle("Codex Token 用量明細")
+        self.setWindowTitle(f"{panel.title_text}明細")
         self.setObjectName("tokenDetails")
         self.setStyleSheet(style + """
             QDialog#tokenDetails { background: #0C1421; }
@@ -447,7 +459,7 @@ class TokenDetailsDialog(QDialog):
         header = QHBoxLayout()
         heading = QVBoxLayout()
         heading.setSpacing(4)
-        self.title = QLabel("Codex Token 用量")
+        self.title = QLabel(panel.title_text)
         self.title.setObjectName("dialogTitle")
         heading.addWidget(self.title)
         self.summary = OdometerLabel("本機已記錄用量 · 讀取中…")
@@ -732,3 +744,13 @@ def demo_report(period="today") -> UsageReport:
     )
     now = datetime.now(TAIWAN_TZ).timestamp()
     return UsageReport(period, groups, sum(g.total_tokens for g in groups), 89, now, now, {}, 4, now)
+
+
+def demo_claude_report(period="today") -> UsageReport:
+    groups = (
+        UsageGroup("claude-fable-5", "xhigh", 2114000, 188000, 2302000, 1723000, 262000, 41000, 42, 11),
+        UsageGroup("claude-fable-5", "high", 873000, 96000, 969000, 702000, 84000, 9000, 24, 9),
+        UsageGroup("claude-haiku-4-5", "medium", 214000, 31000, 245000, 118000, 22000, 0, 12, 5),
+    )
+    now = datetime.now(TAIWAN_TZ).timestamp()
+    return UsageReport(period, groups, sum(g.total_tokens for g in groups), 78, now, now, {}, 3, now)

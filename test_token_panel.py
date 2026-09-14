@@ -71,19 +71,25 @@ def test_summary_top_three_total_includes_other_models_and_period_persistence(qa
 
 def test_panel_position_visibility_and_no_gap_when_hidden(widget):
     panel = widget.token_panel
+    claude_panel = widget.claude_token_panel
     title = next(label for label in widget.findChildren(QLabel) if label.text() == "常用指令")
     assert widget.surface_scroll.geometry().bottom() < panel.geometry().top()
     assert panel.geometry().bottom() < title.mapTo(widget, QPoint()).y()
     assert 0 <= title.mapTo(widget, QPoint()).y() - panel.mapTo(widget, panel.rect().bottomLeft()).y() <= 16
+    # Claude Token 卡位於額度捲動區內、緊接 Claude 額度卡之後。
+    assert claude_panel.parentWidget() is widget.claude_card.parentWidget()
+    assert claude_panel.geometry().top() > widget.claude_card.geometry().bottom()
     widget.settings.setValue(tp.SHOW_TOKEN_SETTING, False)
     widget._reapply_view()
     QTest.qWait(50)
     assert panel.isHidden()
+    assert claude_panel.isHidden()
     assert 0 <= title.mapTo(widget, QPoint()).y() - widget.surface_scroll.mapTo(widget, widget.surface_scroll.rect().bottomLeft()).y() <= 16
     widget.settings.setValue(tp.SHOW_TOKEN_SETTING, True)
     widget._reapply_view()
     QTest.qWait(30)
     assert not panel.isHidden()
+    assert not claude_panel.isHidden()
 
 
 def test_codex_quota_card_fully_visible_with_token_summary(widget):

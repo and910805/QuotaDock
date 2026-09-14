@@ -43,12 +43,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from prompt_tools import PasteController, PromptPanel, PromptStore
-from token_panel import SHOW_TOKEN_SETTING, TokenUsagePanel, TokenUsageService, demo_report
+from claude_usage import ClaudeUsageCollector
+from token_panel import (SHOW_TOKEN_SETTING, TokenUsagePanel, TokenUsageService,
+                         demo_claude_report, demo_report)
 from odometer import DigitRoller, OdometerLabel
 
 
 APP_NAME = "Quota PromptDock"
-APP_VERSION = "1.4.4"
+APP_VERSION = "1.5.0"
 UI_SCALE_SETTING = "ui_scale_percent"
 UI_SCALE_CHOICES = (75, 90, 100, 110, 125, 150)
 TAIWAN_TZ = timezone(timedelta(hours=8))
@@ -1419,17 +1421,29 @@ class UsageWidget(QWidget):
         self.countdown_timer.start(30_000)
 
         self.token_service = None
+        self.claude_token_service = None
         if demo:
             self.token_panel.is_demo = True
             self.token_panel.apply_report(demo_report(self.token_panel.period.currentData()))
             self.token_panel.period_changed.connect(
                 lambda period: self.token_panel.apply_report(demo_report(period)))
+            self.claude_token_panel.is_demo = True
+            self.claude_token_panel.apply_report(
+                demo_claude_report(self.claude_token_panel.period.currentData()))
+            self.claude_token_panel.period_changed.connect(
+                lambda period: self.claude_token_panel.apply_report(demo_claude_report(period)))
         else:
             self.token_service = TokenUsageService(
                 APP_DIR / "token_usage.sqlite3", self.token_panel.period.currentData(), parent=self)
             self.token_panel.attach_service(self.token_service)
             QApplication.instance().aboutToQuit.connect(self.token_service.stop)
             self.token_service.start()
+            self.claude_token_service = TokenUsageService(
+                APP_DIR / "claude_token_usage.sqlite3", self.claude_token_panel.period.currentData(),
+                parent=self, collector_factory=ClaudeUsageCollector, thread_name="ClaudeTokenLedger")
+            self.claude_token_panel.attach_service(self.claude_token_service)
+            QApplication.instance().aboutToQuit.connect(self.claude_token_service.stop)
+            self.claude_token_service.start()
 
         if demo:
             QTimer.singleShot(
@@ -1612,6 +1626,14 @@ class UsageWidget(QWidget):
         self.claude_five_section.hide()
         self.claude_week_section.hide()
         quota.addWidget(self.claude_card)
+        # Claude Token 卡放在額度捲動區內：小螢幕靠捲動即可，不佔用固定高度，
+        # 也不會把常用指令與底部操作擠出視窗。
+        self.claude_token_panel = TokenUsagePanel(
+            self.settings, DIALOG_STYLE, self,
+            title="Claude Token 用量", period_setting="tokens/claude_period", source_hint="Claude Code")
+        self.claude_token_panel.setVisible(_setting_bool(self.settings, SHOW_TOKEN_SETTING, True))
+        self.claude_token_panel.layout_changed.connect(lambda: self._content_fit_timer.start(0))
+        quota.addWidget(self.claude_token_panel)
         quota.addStretch()
 
         self.token_panel = TokenUsagePanel(self.settings, DIALOG_STYLE, self)
@@ -1683,7 +1705,9 @@ class UsageWidget(QWidget):
                     self._shell_layout.activate()
                     self._quota_layout.activate()
             # 以最後一張卡片的實際邊界量測，避免文字換行的預估高度留下空隙。
-            needed = self.claude_card.geometry().bottom() + 1
+            last_card = (self.claude_token_panel
+                         if not self.claude_token_panel.isHidden() else self.claude_card)
+            needed = last_card.geometry().bottom() + 1
             surrounding = self.height() - self.surface_scroll.height()
             height = min(self._height_limit, surrounding + needed)
             if height != self.height():
@@ -1704,9 +1728,15 @@ class UsageWidget(QWidget):
         """縮小額度摘要，常用指令與底部操作保持可見；兩區不互相巢狀捲動。"""
         if self._adjusting_height:
             return
+        # Codex 卡維持原本的縮列門檻；Claude 卡在捲動區內，空間由捲動解決，
+        # 只有在較矮的視窗縮成單列讓摘要不用捲太遠。
+        show_tokens = _setting_bool(self.settings, SHOW_TOKEN_SETTING, True)
         self.token_panel.set_row_limit(3 if self._height_limit >= 850 else 1 if self._height_limit >= 680 else 0)
+        self.claude_token_panel.set_row_limit(3 if self._height_limit >= 850 else 1)
+        self.token_panel.setVisible(show_tokens)
+        self.claude_token_panel.setVisible(show_tokens)
         token_height = self.token_panel.sizeHint().height() + 8 if not self.token_panel.isHidden() else 0
-        if self.token_panel.isHidden():
+        if token_height == 0:
             self.prompt_panel.setFixedHeight(min(258, max(144, self._height_limit - 272)))
         else:
             self.prompt_panel.setFixedHeight(min(258, max(96, self._height_limit - 310 - token_height)))
@@ -1783,8 +1813,9 @@ class UsageWidget(QWidget):
         self.tray.show()
 
     def refresh(self) -> None:
-        if getattr(self, "token_service", None) is not None:
-            self.token_service.refresh()
+        for service in (getattr(self, "token_service", None), getattr(self, "claude_token_service", None)):
+            if service is not None:
+                service.refresh()
         if self._fetching or self._demo:
             return
         self._fetching = True
@@ -1984,7 +2015,7 @@ class UsageWidget(QWidget):
 
     def _reapply_view(self) -> None:
         """設定存檔後立刻套用，不用等下一次自動更新。"""
-        self.token_panel.setVisible(_setting_bool(self.settings, SHOW_TOKEN_SETTING, True))
+        # Token 卡的顯示與縮列統一由 _adapt_layout 決定。
         self._adapt_layout()
         self._content_fit_timer.start(0)
         if self._snapshot is not None:

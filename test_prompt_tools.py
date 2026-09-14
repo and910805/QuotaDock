@@ -247,6 +247,8 @@ def test_local_server_errors_and_shutdown(qapp, monkeypatch, error, expected):
 
 def test_modern_codex_cli_is_found(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    # 開發機的 repo 上一層可能放著真的 codex-local.exe；凍結旗標讓該分支不生效。
+    monkeypatch.setattr(app.sys, "frozen", True, raising=False)
     path = tmp_path / "OpenAI" / "Codex" / "bin" / "version" / "codex.exe"
     path.parent.mkdir(parents=True)
     path.touch()
