@@ -37,15 +37,18 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
 from prompt_tools import PasteController, PromptPanel, PromptStore
+from token_panel import SHOW_TOKEN_SETTING, TokenUsagePanel, TokenUsageService, demo_report
+from odometer import DigitRoller, OdometerLabel
 
 
 APP_NAME = "Quota PromptDock"
-APP_VERSION = "1.3.3"
+APP_VERSION = "1.4.3"
 UI_SCALE_SETTING = "ui_scale_percent"
 UI_SCALE_CHOICES = (75, 90, 100, 110, 125, 150)
 TAIWAN_TZ = timezone(timedelta(hours=8))
@@ -921,12 +924,15 @@ class UsageRing(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._remaining: float | None = None
+        self.roller = DigitRoller(self)
         self.setMinimumSize(160, 160)
         self.setAccessibleName("Codex 剩餘用量")
+        self.roller.set_text("尚無資料")
 
     def set_remaining(self, value: float | None) -> None:
         self._remaining = None if value is None else max(0.0, min(100.0, value))
         self.setAccessibleDescription("尚無資料" if self._remaining is None else f"剩餘 {percent_text(self._remaining)}")
+        self.roller.set_text("尚無資料" if self._remaining is None else percent_text(self._remaining))
         self.update()
 
     def _accent(self) -> QColor:
@@ -952,7 +958,7 @@ class UsageRing(QWidget):
         painter.setPen(QColor("#F8FAFC"))
         painter.setFont(ui_font((23 if compact else 32) if self._remaining is not None else (12 if compact else 17), QFont.Weight.Bold))
         value_rect = QRectF(0, self.height() / 2 - (25 if compact else 36), self.width(), 42 if compact else 58)
-        painter.drawText(value_rect, Qt.AlignmentFlag.AlignCenter, "尚無資料" if self._remaining is None else percent_text(self._remaining))
+        self.roller.paint(painter, value_rect, Qt.AlignmentFlag.AlignCenter)
 
         painter.setPen(QColor("#94A3B8"))
         painter.setFont(ui_font(9 if compact else 11, QFont.Weight.Medium))
@@ -1029,6 +1035,7 @@ class MiniUsageWidget(QWidget):
         super().__init__(None)
         self.owner = owner
         self._remaining: float | None = None
+        self.roller = DigitRoller(self)
         self._press_global: QPoint | None = None
         self._start_position: QPoint | None = None
         self._dragged = False
@@ -1043,10 +1050,12 @@ class MiniUsageWidget(QWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("點一下展開 AI 用量小工具")
         self.setAccessibleName("AI 用量懸浮圖示")
+        self.roller.set_text("—")
 
     def set_remaining(self, value: float | None) -> None:
         self._remaining = None if value is None else max(0.0, min(100.0, value))
         self.setAccessibleDescription("尚無資料" if self._remaining is None else f"目前最低剩餘量 {percent_text(self._remaining)}")
+        self.roller.set_text("—" if self._remaining is None else percent_text(self._remaining))
         self.update()
 
     def accent(self) -> QColor:
@@ -1071,7 +1080,7 @@ class MiniUsageWidget(QWidget):
         painter.drawArc(ring, 90 * 16, round(-360 * 16 * (self._remaining or 0) / 100))
         painter.setPen(QColor("#F8FAFC"))
         painter.setFont(ui_font(13, QFont.Weight.Bold))
-        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "—" if self._remaining is None else percent_text(self._remaining))
+        self.roller.paint(painter, self.rect(), Qt.AlignmentFlag.AlignCenter)
 
     def show_docked(self) -> None:
         saved = self.owner.settings.value("mini_position")
@@ -1198,6 +1207,14 @@ class SettingsDialog(QDialog):
         hint.setStyleSheet("color: #94A3B8; font-size: 12px;")
         layout.addWidget(hint)
 
+        self.show_tokens = QCheckBox("顯示 Token 用量")
+        self.show_tokens.setChecked(_setting_bool(settings, SHOW_TOKEN_SETTING, True))
+        layout.addWidget(self.show_tokens)
+        token_hint = QLabel("隱藏後仍會在背景記錄用量。")
+        token_hint.setWordWrap(True)
+        token_hint.setStyleSheet("color: #94A3B8; font-size: 12px;")
+        layout.addWidget(token_hint)
+
         layout.addWidget(QLabel("自動更新頻率"))
         self.interval = SettingsComboBox()
         self.interval.addItem("每 1 分鐘", 60)
@@ -1285,6 +1302,7 @@ class SettingsDialog(QDialog):
         outer.addLayout(actions)
 
     def save(self) -> None:
+        self.settings.setValue(SHOW_TOKEN_SETTING, self.show_tokens.isChecked())
         self.settings.setValue(UI_SCALE_SETTING, self.ui_scale.currentData())
         self.settings.setValue("refresh_interval", self.interval.currentData())
         self.settings.setValue("low_threshold", self.threshold.currentData())
@@ -1362,6 +1380,19 @@ class UsageWidget(QWidget):
         self.countdown_timer.timeout.connect(self._update_time_labels)
         self.countdown_timer.start(30_000)
 
+        self.token_service = None
+        if demo:
+            self.token_panel.is_demo = True
+            self.token_panel.apply_report(demo_report(self.token_panel.period.currentData()))
+            self.token_panel.period_changed.connect(
+                lambda period: self.token_panel.apply_report(demo_report(period)))
+        else:
+            self.token_service = TokenUsageService(
+                APP_DIR / "token_usage.sqlite3", self.token_panel.period.currentData(), parent=self)
+            self.token_panel.attach_service(self.token_service)
+            QApplication.instance().aboutToQuit.connect(self.token_service.stop)
+            self.token_service.start()
+
         if demo:
             QTimer.singleShot(
                 100,
@@ -1388,6 +1419,9 @@ class UsageWidget(QWidget):
         outer.addWidget(shell)
         self.surface_scroll = QScrollArea()
         self.surface_scroll.setWidgetResizable(True)
+        # Quota content can scroll on short screens. Height allocation below
+        # reserves the complete Codex cycle card before sizing the prompt list.
+        self.surface_scroll.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
         self.surface_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.surface_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.surface_scroll.setStyleSheet("QScrollArea { background: transparent; border: 0; }")
@@ -1459,7 +1493,7 @@ class UsageWidget(QWidget):
         self.ring.setFixedSize(164, 164)
         self.ring_column.addWidget(self.ring, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        self.used_label = QLabel("已使用 —")
+        self.used_label = OdometerLabel("已使用 —")
         self.used_label.setObjectName("usedLabel")
         self.used_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.used_label.setWordWrap(True)
@@ -1487,7 +1521,7 @@ class UsageWidget(QWidget):
         # 兩個視窗都沒有時才退回這行文字，不然卡片會整個空著。
         self.cycle_label = QLabel("額度週期")
         self.cycle_label.setObjectName("cardTitle")
-        self.reset_label = QLabel("等待 Codex 回傳重置時間")
+        self.reset_label = OdometerLabel("等待 Codex 回傳重置時間", exclude_after="重置")
         self.reset_label.setObjectName("cardValue")
         cycle_layout.addWidget(self.cycle_label)
         cycle_layout.addWidget(self.reset_label)
@@ -1542,6 +1576,11 @@ class UsageWidget(QWidget):
         quota.addWidget(self.claude_card)
         quota.addStretch()
 
+        self.token_panel = TokenUsagePanel(self.settings, DIALOG_STYLE, self)
+        self.token_panel.setVisible(_setting_bool(self.settings, SHOW_TOKEN_SETTING, True))
+        self.token_panel.layout_changed.connect(lambda: self._content_fit_timer.start(0))
+        root.addWidget(self.token_panel)
+
         prompt_title = QLabel("常用指令")
         prompt_title.setObjectName("cardTitle")
         root.addWidget(prompt_title)
@@ -1593,6 +1632,18 @@ class UsageWidget(QWidget):
             self.layout().activate()
             self._shell_layout.activate()
             self._quota_layout.activate()
+            if not self.token_panel.isHidden():
+                quota_content = self.surface_scroll.widget()
+                codex_needed = max(
+                    self.cycle_card.mapTo(quota_content, self.cycle_card.rect().bottomRight()).y(),
+                    self.used_label.mapTo(quota_content, self.used_label.rect().bottomRight()).y(),
+                ) + 1
+                chrome = self.height() - self.surface_scroll.height() - self.prompt_panel.height()
+                prompt_height = min(self._prompt_height_target, max(96, self._height_limit - chrome - codex_needed))
+                if prompt_height != self.prompt_panel.height():
+                    self.prompt_panel.setFixedHeight(prompt_height)
+                    self._shell_layout.activate()
+                    self._quota_layout.activate()
             # 以最後一張卡片的實際邊界量測，避免文字換行的預估高度留下空隙。
             needed = self.claude_card.geometry().bottom() + 1
             surrounding = self.height() - self.surface_scroll.height()
@@ -1613,7 +1664,15 @@ class UsageWidget(QWidget):
 
     def _adapt_layout(self) -> None:
         """縮小額度摘要，常用指令與底部操作保持可見；兩區不互相巢狀捲動。"""
-        self.prompt_panel.setFixedHeight(min(258, max(144, self._height_limit - 272)))
+        if self._adjusting_height:
+            return
+        self.token_panel.set_row_limit(3 if self._height_limit >= 850 else 1 if self._height_limit >= 680 else 0)
+        token_height = self.token_panel.sizeHint().height() + 8 if not self.token_panel.isHidden() else 0
+        if self.token_panel.isHidden():
+            self.prompt_panel.setFixedHeight(min(258, max(144, self._height_limit - 272)))
+        else:
+            self.prompt_panel.setFixedHeight(min(258, max(96, self._height_limit - 310 - token_height)))
+        self._prompt_height_target = self.prompt_panel.height()
         compact = self._height_limit < 850
         if compact == self._compact_layout:
             return
@@ -1647,7 +1706,7 @@ class UsageWidget(QWidget):
         header = QHBoxLayout()
         name = QLabel(title)
         name.setObjectName("quotaName")
-        value = QLabel("剩餘 —")
+        value = OdometerLabel("剩餘 —")
         value.setObjectName("quotaValue")
         header.addWidget(name)
         header.addStretch()
@@ -1659,7 +1718,7 @@ class UsageWidget(QWidget):
         bar.setTextVisible(False)
         bar.setFixedHeight(7)
         layout.addWidget(bar)
-        reset = QLabel("重置時間未提供")
+        reset = OdometerLabel("重置時間未提供", exclude_after="重置")
         reset.setObjectName("quotaReset")
         layout.addWidget(reset)
         return section, value, bar, reset
@@ -1686,6 +1745,8 @@ class UsageWidget(QWidget):
         self.tray.show()
 
     def refresh(self) -> None:
+        if getattr(self, "token_service", None) is not None:
+            self.token_service.refresh()
         if self._fetching or self._demo:
             return
         self._fetching = True
@@ -1885,6 +1946,9 @@ class UsageWidget(QWidget):
 
     def _reapply_view(self) -> None:
         """設定存檔後立刻套用，不用等下一次自動更新。"""
+        self.token_panel.setVisible(_setting_bool(self.settings, SHOW_TOKEN_SETTING, True))
+        self._adapt_layout()
+        self._content_fit_timer.start(0)
         if self._snapshot is not None:
             self._render_codex(self._snapshot)
         self._update_mini_usage()

@@ -9,6 +9,7 @@ import uuid
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Callable
+from odometer import OdometerButton
 
 from PySide6.QtCore import QObject, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
@@ -329,7 +330,7 @@ class PromptPanel(QFrame):
         self.content = QWidget(); self.grid = QGridLayout(self.content); self.grid.setContentsMargins(0, 0, 0, 0); self.grid.setSpacing(8); self.grid.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.scroll.setWidget(self.content); layout.addWidget(self.scroll, 1)
         toolbar = QHBoxLayout(); toolbar.setSpacing(8)
-        self.more = QPushButton("更多指令"); self.more.setObjectName("promptTool"); self.more.clicked.connect(self.toggle)
+        self.more = OdometerButton("更多指令"); self.more.setObjectName("promptTool"); self.more.clicked.connect(self.toggle)
         self.edit_button = QPushButton("編輯指令"); self.edit_button.setObjectName("promptTool"); self.edit_button.clicked.connect(self.edit)
         toolbar.addWidget(self.more); toolbar.addWidget(self.edit_button); layout.addLayout(toolbar)
         controller.finished.connect(self.show_feedback)

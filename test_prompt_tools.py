@@ -1,6 +1,7 @@
 """驗證資料保存與 Qt 操作；原生貼上以替身隔離，不操作使用者的視窗。"""
 import ctypes
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -262,6 +263,10 @@ def test_widget_stale_data_and_small_screen(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(app, "CLAUDE_STATE_PATH", tmp_path / "claude.json")
     monkeypatch.setattr(app, "PasteController", lambda parent: pt.PasteController(parent, target=FakeTarget()))
     widget = app.UsageWidget(demo=True)
+    # Keep the original no-token layout contract; the added panel has its own
+    # small-screen and scroll-reachability tests.
+    widget.settings.setValue(app.SHOW_TOKEN_SETTING, False)
+    widget._reapply_view()
     widget.show()
     QTest.qWait(130)
     before = widget.ring._remaining
@@ -288,14 +293,33 @@ def test_widget_stale_data_and_small_screen(qapp, tmp_path, monkeypatch):
     widget.close()
 
 
-def test_short_quota_card_removes_gap_and_keeps_bottom_position(qapp, tmp_path, monkeypatch):
+@pytest.mark.parametrize("demo_delay", [100, 350])
+def test_short_quota_card_removes_gap_and_keeps_bottom_position(qapp, tmp_path, monkeypatch, demo_delay):
+    original_single_shot = app.QTimer.singleShot
+    monkeypatch.setattr(app.QTimer, "singleShot", lambda delay, callback:
+                        original_single_shot(demo_delay if delay == 100 else delay, callback))
     monkeypatch.setattr(app, "APP_DIR", tmp_path)
     monkeypatch.setattr(app, "STATE_PATH", tmp_path / "usage.json")
     monkeypatch.setattr(app, "CLAUDE_STATE_PATH", tmp_path / "claude.json")
     monkeypatch.setattr(app, "PasteController", lambda parent: pt.PasteController(parent, target=FakeTarget()))
     widget = app.UsageWidget(demo=True)
+    widget.settings.setValue(app.SHOW_TOKEN_SETTING, False)
+    widget._reapply_view()
     widget.show()
-    QTest.qWait(160)
+    # Wait for the actual demo result and its layout, not a fixed wall-clock delay.
+    # A slower runner can still be showing the shorter loading state after 160 ms.
+    deadline = time.monotonic() + 5
+    previous_height, stable_frames = None, 0
+    while time.monotonic() < deadline:
+        QTest.qWait(20)
+        ready = widget._snapshot is not None and widget._claude_snapshot is not None and not widget._content_fit_timer.isActive()
+        stable_frames = stable_frames + 1 if ready and widget.height() == previous_height else 0
+        previous_height = widget.height()
+        if stable_frames >= 3:
+            break
+    assert widget._snapshot is not None and widget._claude_snapshot is not None
+    assert not widget._content_fit_timer.isActive()
+    assert stable_frames >= 3
     full_height = widget.height()
     bottom = widget.geometry().bottom()
     snapshot = {"codex": app._demo_snapshot(), "claude": app.ClaudeUsageSnapshot.unavailable(installed=False)}
