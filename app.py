@@ -48,7 +48,7 @@ from odometer import DigitRoller, OdometerLabel
 
 
 APP_NAME = "Quota PromptDock"
-APP_VERSION = "1.4.3"
+APP_VERSION = "1.4.4"
 UI_SCALE_SETTING = "ui_scale_percent"
 UI_SCALE_CHOICES = (75, 90, 100, 110, 125, 150)
 TAIWAN_TZ = timezone(timedelta(hours=8))
@@ -142,6 +142,41 @@ class UpdateChecker:
         return destination
 
 
+def stale_installers(temp_dir: Path, running: Path) -> list[Path]:
+    """更新完留在 %TEMP% 的安裝檔，每個都是幾十 MB，該收掉。
+
+    正在執行的那一個要留著：自動更新的第一步就是從 %TEMP% 執行安裝檔，
+    它還要把自己複製到安裝目錄。
+    """
+    try:
+        candidates = sorted(temp_dir.glob(f"{INSTALLER_STEM}-*.exe"))
+    except OSError:
+        return []
+    stale = []
+    for candidate in candidates:
+        try:
+            if candidate.samefile(running):
+                continue
+        except OSError:
+            pass
+        stale.append(candidate)
+    return stale
+
+
+def installer_target(version: str) -> Path:
+    """自動更新把安裝檔下載到這裡。"""
+    return Path(tempfile.gettempdir()) / f"{INSTALLER_STEM}-{version}.exe"
+
+
+def clear_stale_installers() -> None:
+    for leftover in stale_installers(Path(tempfile.gettempdir()), Path(sys.executable)):
+        try:
+            leftover.unlink()
+        except OSError:
+            # 還被佔用（例如另一個執行個體正在更新）就下次再說，不值得吵使用者。
+            pass
+
+
 def clamped_position(point: QPoint, size: QSize, area: QRect) -> QPoint:
     """把記住的座標夾回可見範圍。
 
@@ -161,6 +196,9 @@ GITHUB_REPO = "Andy61490963/Quota-PromptDock"
 RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RELEASE_DOWNLOAD_PREFIX = f"https://github.com/{GITHUB_REPO}/releases/download/"
 RELEASE_ASSET = "QuotaDock-Windows-x64.exe"
+# 下載回來的安裝檔叫這個名字。清理殘留時要用同一組命名，
+# 否則像 APP_NAME 改名那樣一動，清理就默默失效。
+INSTALLER_STEM = "QuotaDock"
 UPDATE_CHECK_SETTING = "check_updates"
 CODEX_RING_SETTING = "codex_ring"
 # Codex 把 5 小時與 7 天分別放在 primary/secondary，但哪個在前面會變，
@@ -1821,7 +1859,7 @@ class UsageWidget(QWidget):
         version = self._update_version
 
         def task() -> None:
-            target = Path(tempfile.gettempdir()) / f"QuotaDock-{version}.exe"
+            target = installer_target(version)
             try:
                 UpdateChecker().download(url, target)
             except Exception as exc:
@@ -2762,6 +2800,8 @@ def main() -> int:
         if not server.listen(name):
             QMessageBox.warning(None, APP_NAME, "無法啟動常駐服務，請確認是否已有程式正在執行。")
             return 1
+    if getattr(sys, "frozen", False) and not args.demo and not args.screenshot:
+        clear_stale_installers()
     widget = UsageWidget(screenshot_path=args.screenshot, demo=args.demo)
     if server:
         def wake_existing() -> None:

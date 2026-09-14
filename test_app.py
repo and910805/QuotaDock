@@ -11,6 +11,7 @@ from app import (
     codex_windows,
     is_newer_version,
     parse_release,
+    stale_installers,
     ClaudeCliLocator,
     ClaudeUsageSnapshot,
     UsageSnapshot,
@@ -433,3 +434,26 @@ def test_mini_bubble_counts_the_codex_five_hour_window() -> None:
     codex = codex_snapshot(UsageWindow(95, 300, 2_000), UsageWindow(20, 10080, 9_000))
     assert mini_remaining("codex", codex, None) == 5
     assert mini_remaining("min", codex, None) == 5
+
+
+def test_stale_installers_skip_the_running_one(tmp_path: Path) -> None:
+    """自動更新是從 %TEMP% 執行安裝檔的，正在跑的那一個不能刪。"""
+    running = make_exe(tmp_path / "QuotaDock-1.4.4.exe")
+    older = make_exe(tmp_path / "QuotaDock-1.4.3.exe")
+    make_exe(tmp_path / "SomethingElse.exe")
+
+    assert stale_installers(tmp_path, running) == [older]
+    assert stale_installers(tmp_path / "missing", running) == []
+
+
+def test_stale_installers_when_running_from_elsewhere(tmp_path: Path) -> None:
+    installer = make_exe(tmp_path / "QuotaDock-1.4.3.exe")
+    assert stale_installers(tmp_path, tmp_path / "not-there.exe") == [installer]
+
+
+def test_cleanup_pattern_matches_what_the_downloader_writes(tmp_path: Path, monkeypatch) -> None:
+    """下載端與清理端必須共用命名，否則改名後清理會默默失效。"""
+    monkeypatch.setattr(app_module.tempfile, "gettempdir", lambda: str(tmp_path))
+    target = make_exe(app_module.installer_target("9.9.9"))
+    assert target.parent == tmp_path
+    assert stale_installers(tmp_path, tmp_path / "not-running.exe") == [target]
