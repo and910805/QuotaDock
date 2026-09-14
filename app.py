@@ -50,7 +50,7 @@ from odometer import DigitRoller, OdometerLabel
 
 
 APP_NAME = "Quota PromptDock"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 UI_SCALE_SETTING = "ui_scale_percent"
 UI_SCALE_CHOICES = (75, 90, 100, 110, 125, 150)
 TAIWAN_TZ = timezone(timedelta(hours=8))
@@ -88,11 +88,12 @@ def is_newer_version(latest: str, current: str) -> bool:
     return _version_key(latest.lstrip("vV")) > _version_key(current.lstrip("vV"))
 
 
-def parse_release(payload: dict[str, Any]) -> tuple[str, str] | None:
+def parse_release(payload: dict[str, Any], prefix: str | None = None) -> tuple[str, str] | None:
     """從 GitHub release JSON 取出 (版本, 下載網址)。
 
     草稿、預發行、或沒有 Windows 執行檔的 release 一律當作沒有新版；下載網址
-    也必須真的指向本專案的 release，免得回應被動過手腳就把使用者導去別的地方。
+    也必須真的指向被查詢的那個 repo 的 release，免得回應被動過手腳
+    就把使用者導去別的地方。
     """
     if payload.get("draft") or payload.get("prerelease"):
         return None
@@ -103,7 +104,7 @@ def parse_release(payload: dict[str, Any]) -> tuple[str, str] | None:
         if str(asset.get("name") or "") != RELEASE_ASSET:
             continue
         url = str(asset.get("browser_download_url") or "")
-        if url.startswith(RELEASE_DOWNLOAD_PREFIX):
+        if url.startswith(prefix if prefix is not None else RELEASE_DOWNLOAD_PREFIX):
             return tag.lstrip("vV"), url
     return None
 
@@ -125,15 +126,26 @@ class UpdateChecker:
         )
 
     def latest(self) -> tuple[str, str] | None:
-        with urllib.request.urlopen(self._request(RELEASE_API), timeout=self.timeout_seconds) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-        if not isinstance(payload, dict):
-            return None
-        return parse_release(payload)
+        """逐一查詢每個更新來源，回傳版本最新的正式版；單一來源失敗不影響其他來源。"""
+        best: tuple[str, str] | None = None
+        for repo in UPDATE_REPOS:
+            try:
+                with urllib.request.urlopen(
+                    self._request(release_api(repo)), timeout=self.timeout_seconds
+                ) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            found = parse_release(payload, release_download_prefix(repo))
+            if found and (best is None or is_newer_version(found[0], best[0])):
+                best = found
+        return best
 
     def download(self, url: str, destination: Path) -> Path:
-        if not url.startswith(RELEASE_DOWNLOAD_PREFIX):
-            raise RuntimeError("下載網址不是本專案的 release，已中止。")
+        if not any(url.startswith(release_download_prefix(repo)) for repo in UPDATE_REPOS):
+            raise RuntimeError("下載網址不是本專案任一更新來源的 release，已中止。")
         with urllib.request.urlopen(self._request(url), timeout=180) as response:
             with destination.open("wb") as handle:
                 shutil.copyfileobj(response, handle)
@@ -194,9 +206,21 @@ def clamped_position(point: QPoint, size: QSize, area: QRect) -> QPoint:
     )
 
 
-GITHUB_REPO = "Andy61490963/Quota-PromptDock"
-RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-RELEASE_DOWNLOAD_PREFIX = f"https://github.com/{GITHUB_REPO}/releases/download/"
+GITHUB_REPO = "and910805/QuotaDock"
+# 更新來源不只主要 repo：協作 fork 也會出正式版，哪邊版本新就用哪邊。
+UPDATE_REPOS = (GITHUB_REPO, "Andy61490963/Quota-PromptDock")
+
+
+def release_api(repo: str) -> str:
+    return f"https://api.github.com/repos/{repo}/releases/latest"
+
+
+def release_download_prefix(repo: str) -> str:
+    return f"https://github.com/{repo}/releases/download/"
+
+
+RELEASE_API = release_api(GITHUB_REPO)
+RELEASE_DOWNLOAD_PREFIX = release_download_prefix(GITHUB_REPO)
 RELEASE_ASSET = "QuotaDock-Windows-x64.exe"
 # 下載回來的安裝檔叫這個名字。清理殘留時要用同一組命名，
 # 否則像 APP_NAME 改名那樣一動，清理就默默失效。
@@ -1904,8 +1928,28 @@ class UsageWidget(QWidget):
         self._update_downloading = False
         self.update_button.setText("安裝中…請稍候")
         # 下載回來的就是完整安裝檔：它會關掉舊的、覆蓋安裝、再自己啟動。
-        subprocess.Popen([installer, "--install"], close_fds=True, creationflags=CREATE_NO_WINDOW)
-        self.quit_app()
+        try:
+            process = subprocess.Popen(
+                [installer, "--install"], close_fds=True, creationflags=CREATE_NO_WINDOW
+            )
+        except OSError as exc:
+            # 防毒或系統政策擋下 %TEMP% 的執行檔時會走到這裡；
+            # 不處理的話畫面會永遠停在「安裝中」。
+            self._on_update_failed(f"無法啟動安裝程式：{exc}")
+            return
+
+        def confirm_and_quit() -> None:
+            code = process.poll()
+            if code not in (None, 0):
+                self._on_update_failed(
+                    f"安裝程式異常結束（代碼 {code}），可能被防毒軟體攔下。"
+                    "可改到 GitHub Releases 手動下載安裝。"
+                )
+                return
+            self.quit_app()
+
+        # 給安裝程式一點時間證明自己有活著，再退出舊程式。
+        QTimer.singleShot(1200, confirm_and_quit)
 
     def _on_update_failed(self, message: str) -> None:
         self._update_downloading = False
@@ -2609,6 +2653,25 @@ def configure_autostart(enabled: bool) -> None:
             pass
 
 
+def _install_failure_dialog(message: str) -> None:
+    """安裝流程沒有 QApplication 可用，直接用原生訊息框，絕不無聲死亡。"""
+    import ctypes
+
+    ctypes.windll.user32.MessageBoxW(None, message, APP_NAME, 0x10)  # MB_ICONERROR
+
+
+def _copy_with_retry(source: Path, destination: Path, attempts=20, delay=0.5) -> None:
+    """舊程序釋放檔案鎖可能比 Stop-Process 慢，多等幾秒而不是直接失敗。"""
+    for attempt in range(attempts):
+        try:
+            shutil.copy2(source, destination)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+
+
 def install_frozen_release() -> bool:
     """Install a downloaded one-file release, launch the installed copy, then exit."""
     if os.name != "nt" or not getattr(sys, "frozen", False):
@@ -2620,47 +2683,54 @@ def install_frozen_release() -> bool:
     if str(current).casefold() == str(target.resolve()).casefold():
         return False
 
-    install_dir.mkdir(parents=True, exist_ok=True)
     installer_env = os.environ.copy()
     installer_env["QUOTADOCK_INSTALL_TARGET"] = str(target)
-    if target.exists():
-        stop_script = (
-            "$target = [IO.Path]::GetFullPath($env:QUOTADOCK_INSTALL_TARGET); "
-            "Get-CimInstance Win32_Process | "
-            "Where-Object { $_.ExecutablePath -eq $target } | "
-            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; "
-            "Start-Sleep -Milliseconds 500"
+    try:
+        install_dir.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            stop_script = (
+                "$target = [IO.Path]::GetFullPath($env:QUOTADOCK_INSTALL_TARGET); "
+                "Get-CimInstance Win32_Process | "
+                "Where-Object { $_.ExecutablePath -eq $target } | "
+                "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; "
+                "Start-Sleep -Milliseconds 500"
+            )
+            subprocess.run(
+                ["powershell.exe", "-NoProfile", "-Command", stop_script],
+                check=False,
+                creationflags=CREATE_NO_WINDOW,
+                env=installer_env,
+            )
+
+        _copy_with_retry(current, target)
+        shortcut_script = (
+            "$target = $env:QUOTADOCK_INSTALL_TARGET; $folder = Split-Path -Parent $target; "
+            "$path = Join-Path ([Environment]::GetFolderPath('Desktop')) 'QuotaDock.lnk'; "
+            "$shell = New-Object -ComObject WScript.Shell; "
+            "$shortcut = $shell.CreateShortcut($path); "
+            "$shortcut.TargetPath = $target; $shortcut.WorkingDirectory = $folder; "
+            "$shortcut.Description = 'AI 額度與常用指令小工具'; "
+            "$shortcut.IconLocation = \"$target,0\"; $shortcut.Save()"
         )
+        # 捷徑建不出來（COM 被政策關掉之類）不該讓整個更新中斷。
         subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command", stop_script],
+            ["powershell.exe", "-NoProfile", "-Command", shortcut_script],
             check=False,
             creationflags=CREATE_NO_WINDOW,
             env=installer_env,
         )
-
-    shutil.copy2(current, target)
-    shortcut_script = (
-        "$target = $env:QUOTADOCK_INSTALL_TARGET; $folder = Split-Path -Parent $target; "
-        "$path = Join-Path ([Environment]::GetFolderPath('Desktop')) 'QuotaDock.lnk'; "
-        "$shell = New-Object -ComObject WScript.Shell; "
-        "$shortcut = $shell.CreateShortcut($path); "
-        "$shortcut.TargetPath = $target; $shortcut.WorkingDirectory = $folder; "
-        "$shortcut.Description = 'AI 額度與常用指令小工具'; "
-        "$shortcut.IconLocation = \"$target,0\"; $shortcut.Save()"
-    )
-    subprocess.run(
-        ["powershell.exe", "-NoProfile", "-Command", shortcut_script],
-        check=True,
-        creationflags=CREATE_NO_WINDOW,
-        env=installer_env,
-    )
-    _set_frozen_autostart(target, _setting_bool(QSettings("EricTools", "CodexUsageWidget"), "autostart", False))
-    subprocess.Popen(
-        [str(target)],
-        cwd=str(install_dir),
-        close_fds=True,
-        creationflags=CREATE_NO_WINDOW,
-    )
+        _set_frozen_autostart(target, _setting_bool(QSettings("EricTools", "CodexUsageWidget"), "autostart", False))
+        subprocess.Popen(
+            [str(target)],
+            cwd=str(install_dir),
+            close_fds=True,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except Exception as exc:  # 安裝失敗要讓使用者看到原因，而不是程式憑空消失。
+        _install_failure_dialog(
+            f"更新安裝失敗：{exc}\n\n"
+            f"請到 GitHub Releases 重新下載，或手動把安裝檔複製到：\n{target}"
+        )
     return True
 
 

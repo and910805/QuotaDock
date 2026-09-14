@@ -4,7 +4,7 @@ Windows 桌面上的 AI 額度與常用指令小工具。查看 Codex／Claude C
 
 **目前正式版：v1.5.0** · Windows x64 · 繁體中文 · 不需安裝 Python
 
-[下載最新版本](https://github.com/Andy61490963/Quota-PromptDock/releases/latest) · [v1.4.3 更新說明](https://github.com/Andy61490963/Quota-PromptDock/releases/tag/v1.4.3) · [驗證紀錄](驗證紀錄.md)
+[下載最新版本](https://github.com/and910805/QuotaDock/releases/latest) · [更新說明](https://github.com/and910805/QuotaDock/releases) · [驗證紀錄](驗證紀錄.md)
 
 <img src="token-preview.png" width="340" alt="Quota PromptDock 主畫面；數字與指令為示範資料">
 
@@ -21,7 +21,7 @@ Windows 桌面上的 AI 額度與常用指令小工具。查看 Codex／Claude C
 
 ## 下載與開始使用
 
-1. 前往 [最新正式版本](https://github.com/Andy61490963/Quota-PromptDock/releases/latest)，下載 **`QuotaDock-Windows-x64.exe`**。
+1. 前往 [最新正式版本](https://github.com/and910805/QuotaDock/releases/latest)，下載 **`QuotaDock-Windows-x64.exe`**。
 2. 雙擊執行。若舊版正在執行，先從系統匣選單結束舊版；重複啟動只會喚醒原本的程式。
 3. 額度查詢沿用可用且已登入的 Codex／Claude Code 本機環境，不需要在本工具填寫 API Key。首次啟動會在背景整理可核對的 Codex 歷史 Token 紀錄。
 4. 使用常用指令時，先點一下 Codex、記事本或瀏覽器的輸入框，再點小工具的指令按鈕。程式會複製文字並嘗試切回原視窗貼上，**不會按 Enter 或自動送出**。
@@ -134,7 +134,7 @@ v1.4.3 為會變動的統計數值加入約半秒的滾動動畫：
 - **介面縮放**：75%、90%、100%、110%、125%、150%，預設 100%。改變比例後會重新開啟並記住選擇，效果會疊加 Windows 縮放。
 - **檢查新版本（連線 GitHub）**：預設開啟。執行檔啟動約 5 秒後查一次，持續開著則每 24 小時再查；原始碼與展示模式不執行版本檢查。
 
-版本檢查讀取本專案的 [最新正式 Release](https://github.com/Andy61490963/Quota-PromptDock/releases/latest)，版本號必須比目前版本高，且附有名稱完全相同的 `QuotaDock-Windows-x64.exe`。草稿、預發行及只有程式碼變動的版本不會提示更新。
+版本檢查同時讀取 [and910805/QuotaDock](https://github.com/and910805/QuotaDock/releases/latest) 與 [Andy61490963/Quota-PromptDock](https://github.com/Andy61490963/Quota-PromptDock/releases/latest) 的最新正式 Release，取版本較新者；版本號必須比目前版本高，且附有名稱完全相同的 `QuotaDock-Windows-x64.exe`，下載網址也必須指回該 Release 本身。單一來源查詢失敗不影響另一邊。草稿、預發行及只有程式碼變動的版本不會提示更新。
 
 偵測到新版後會顯示「有新版 · 點此更新」。**由你點擊後才下載與安裝**：下載至暫存目錄、結束舊程式、替換安裝位置的執行檔，再重新開啟。既有設定、指令與 Token 資料庫沿用原位置。
 
@@ -193,7 +193,7 @@ Remove-Item Env:QT_QPA_PLATFORM
 .\build_release.ps1
 ```
 
-打包腳本會先執行測試，再產生 `release/QuotaDock.exe`。v1.4.3 已通過 **124 項自動化測試**與 [GitHub Windows 打包](https://github.com/Andy61490963/Quota-PromptDock/actions/runs/34811321890)，另完成 27 項原生動畫／Token 介面測試及 75%～150% Qt 縮放渲染。測試使用隔離資料與替身；跨程式貼上及實際 Windows DPI／多螢幕操作的驗證範圍見 [驗證紀錄](驗證紀錄.md)。
+打包腳本會先執行測試，再產生 `release/QuotaDock.exe`。目前共 **139 項自動化測試**，發布時由 [GitHub Windows 打包流程](https://github.com/and910805/QuotaDock/actions)重跑；另完成 27 項原生動畫／Token 介面測試及 75%～150% Qt 縮放渲染。測試使用隔離資料與替身；跨程式貼上及實際 Windows DPI／多螢幕操作的驗證範圍見 [驗證紀錄](驗證紀錄.md)。
 
 | 檔案 | 職責 |
 |---|---|

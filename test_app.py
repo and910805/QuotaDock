@@ -333,7 +333,9 @@ def test_every_locate_branch_agrees_on_the_return_shape(tmp_path: Path, monkeypa
     assert isinstance(inconclusive, bool)
 
 
-def release_payload(tag: str = "v1.3.0", asset: str = RELEASE_ASSET, **extra) -> dict:
+def release_payload(tag: str = "v1.3.0", asset: str = RELEASE_ASSET,
+                    repo: str = app_module.GITHUB_REPO, **extra) -> dict:
+    prefix = app_module.release_download_prefix(repo)
     payload = {
         "tag_name": tag,
         "draft": False,
@@ -342,7 +344,7 @@ def release_payload(tag: str = "v1.3.0", asset: str = RELEASE_ASSET, **extra) ->
             {"name": "source.zip", "browser_download_url": "https://example.com/source.zip"},
             {
                 "name": asset,
-                "browser_download_url": f"https://github.com/Andy61490963/Quota-PromptDock/releases/download/{tag}/{asset}",
+                "browser_download_url": f"{prefix}{tag}/{asset}",
             },
         ],
     }
@@ -363,7 +365,7 @@ def test_release_parsing_picks_the_windows_asset() -> None:
     assert found is not None
     version, url = found
     assert version == "1.3.0"
-    assert url.startswith("https://github.com/Andy61490963/Quota-PromptDock/releases/download/")
+    assert url.startswith(app_module.RELEASE_DOWNLOAD_PREFIX)
 
 
 def test_drafts_prereleases_and_missing_assets_are_ignored() -> None:
@@ -379,6 +381,84 @@ def test_download_url_from_another_host_is_refused() -> None:
     hijacked = release_payload()
     hijacked["assets"][1]["browser_download_url"] = "https://evil.example.com/QuotaDock-Windows-x64.exe"
     assert parse_release(hijacked) is None
+
+
+def test_release_prefix_is_checked_per_repo() -> None:
+    fork = app_module.UPDATE_REPOS[1]
+    fork_payload = release_payload(repo=fork)
+    # 查 fork 時 fork 的網址合法；同一份回應若假裝來自主要 repo 則不合法。
+    assert parse_release(fork_payload, app_module.release_download_prefix(fork)) is not None
+    assert parse_release(fork_payload, app_module.RELEASE_DOWNLOAD_PREFIX) is None
+
+
+class FakeResponse:
+    def __init__(self, payload: dict) -> None:
+        import json as json_module
+
+        self._data = json_module.dumps(payload).encode("utf-8")
+
+    def read(self) -> bytes:
+        return self._data
+
+    def __enter__(self) -> "FakeResponse":
+        return self
+
+    def __exit__(self, *args) -> bool:
+        return False
+
+
+def serve_releases(monkeypatch, by_api: dict) -> None:
+    def fake_urlopen(request, timeout=None):
+        result = by_api[request.full_url]
+        if isinstance(result, Exception):
+            raise result
+        return FakeResponse(result)
+
+    monkeypatch.setattr(app_module.urllib.request, "urlopen", fake_urlopen)
+
+
+def test_update_check_takes_the_newest_release_of_any_source(monkeypatch) -> None:
+    primary, fork = app_module.UPDATE_REPOS
+    serve_releases(monkeypatch, {
+        app_module.release_api(primary): release_payload(tag="v1.5.1", repo=primary),
+        app_module.release_api(fork): release_payload(tag="v1.6.0", repo=fork),
+    })
+    found = app_module.UpdateChecker().latest()
+    assert found is not None
+    assert found[0] == "1.6.0"
+    assert found[1].startswith(app_module.release_download_prefix(fork))
+
+    serve_releases(monkeypatch, {
+        app_module.release_api(primary): release_payload(tag="v2.0.0", repo=primary),
+        app_module.release_api(fork): release_payload(tag="v1.6.0", repo=fork),
+    })
+    found = app_module.UpdateChecker().latest()
+    assert found is not None and found[0] == "2.0.0"
+    assert found[1].startswith(app_module.release_download_prefix(primary))
+
+
+def test_update_check_survives_one_source_being_down(monkeypatch) -> None:
+    import urllib.error
+
+    primary, fork = app_module.UPDATE_REPOS
+    serve_releases(monkeypatch, {
+        app_module.release_api(primary): urllib.error.URLError("boom"),
+        app_module.release_api(fork): release_payload(tag="v1.9.0", repo=fork),
+    })
+    found = app_module.UpdateChecker().latest()
+    assert found is not None and found[0] == "1.9.0"
+
+    serve_releases(monkeypatch, {
+        app_module.release_api(primary): urllib.error.URLError("boom"),
+        app_module.release_api(fork): urllib.error.URLError("boom"),
+    })
+    assert app_module.UpdateChecker().latest() is None
+
+
+def test_downloads_from_any_listed_source_only(tmp_path: Path) -> None:
+    checker = app_module.UpdateChecker()
+    with pytest.raises(RuntimeError):
+        checker.download("https://evil.example.com/QuotaDock-Windows-x64.exe", tmp_path / "x.exe")
 
 
 def codex_snapshot(primary: UsageWindow | None, secondary: UsageWindow | None) -> UsageSnapshot:

@@ -250,6 +250,77 @@ def test_new_group_query_clears_previous_turn_rows(widget):
     assert not dialog.previous.isEnabled() and not dialog.next.isEnabled()
 
 
+def test_blocked_installer_reports_failure_instead_of_freezing(widget, monkeypatch):
+    # 防毒或政策擋下 %TEMP% 執行檔時，畫面不能停在「安裝中」。
+    def refuse(*args, **kwargs):
+        raise OSError("存取被拒。")
+    monkeypatch.setattr(app.subprocess, "Popen", refuse)
+    quits = []
+    monkeypatch.setattr(widget, "quit_app", lambda: quits.append(True))
+    widget._update_version = "9.9.9"
+    widget._on_update_ready("C:/fake/installer.exe")
+    assert "更新失敗" in widget.update_button.text()
+    assert widget.update_button.isEnabled()
+    assert not quits
+
+
+def test_crashed_installer_reports_failure_and_keeps_app_running(widget, monkeypatch):
+    class DeadProcess:
+        def poll(self):
+            return 1
+    monkeypatch.setattr(app.subprocess, "Popen", lambda *a, **k: DeadProcess())
+    quits = []
+    monkeypatch.setattr(widget, "quit_app", lambda: quits.append(True))
+    widget._update_version = "9.9.9"
+    widget._on_update_ready("C:/fake/installer.exe")
+    assert widget.update_button.text() == "安裝中…請稍候"
+    QTest.qWait(1600)
+    assert "更新失敗" in widget.update_button.text()
+    assert not quits
+
+
+def test_running_installer_lets_the_old_app_quit(widget, monkeypatch):
+    class LiveProcess:
+        def poll(self):
+            return None
+    monkeypatch.setattr(app.subprocess, "Popen", lambda *a, **k: LiveProcess())
+    quits = []
+    monkeypatch.setattr(widget, "quit_app", lambda: quits.append(True))
+    widget._update_version = "9.9.9"
+    widget._on_update_ready("C:/fake/installer.exe")
+    QTest.qWait(1600)
+    assert quits == [True]
+
+
+def test_copy_with_retry_waits_out_a_file_lock(tmp_path, monkeypatch):
+    source = tmp_path / "new.exe"
+    source.write_bytes(b"new build")
+    destination = tmp_path / "target.exe"
+    failures = iter([PermissionError("locked"), PermissionError("locked")])
+    original = app.shutil.copy2
+
+    def flaky(src, dst):
+        try:
+            raise next(failures)
+        except StopIteration:
+            return original(src, dst)
+
+    monkeypatch.setattr(app.shutil, "copy2", flaky)
+    app._copy_with_retry(source, destination, attempts=5, delay=0)
+    assert destination.read_bytes() == b"new build"
+
+    monkeypatch.setattr(app.shutil, "copy2",
+                        lambda src, dst: (_ for _ in ()).throw(PermissionError("locked")))
+    with pytest.raises(PermissionError):
+        app._copy_with_retry(source, destination, attempts=3, delay=0)
+
+
+def test_update_checker_reads_both_repositories() -> None:
+    assert app.GITHUB_REPO == "and910805/QuotaDock"
+    assert app.UPDATE_REPOS == ("and910805/QuotaDock", "Andy61490963/Quota-PromptDock")
+    assert app.RELEASE_DOWNLOAD_PREFIX.startswith("https://github.com/and910805/QuotaDock/")
+
+
 def test_worker_hidden_collection_detail_queries_and_ui_responsiveness(qapp, tmp_path, monkeypatch):
     root = tmp_path / "codex"
     path = root / "sessions" / "session.jsonl"
